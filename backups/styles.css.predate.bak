@@ -1,0 +1,701 @@
+/* Pace — a digital personal ledger.
+   Warm ruled paper, editorial serif, restrained accounting ink. Calm when
+   spending is under control; red accounting ink only when over pace, deepening
+   with severity. No dark mode, no cards, no gradients-as-decor, no finance
+   blue/green, no web fonts, no images — system fonts only. */
+
+:root {
+  --paper:     #f2ecdd;   /* warm account-book paper */
+  --paper-2:   #f7f2e7;   /* raised inset (sheets) */
+  --line:      rgba(64, 84, 120, 0.10); /* faint ruled horizontal line */
+  --rule:      rgba(43, 39, 33, 0.22);  /* stronger divider */
+  --rule-dot:  rgba(43, 39, 33, 0.28);
+  --ink:       #2b2721;   /* writing ink */
+  --dim:       #8a8069;   /* faded label ink */
+  --margin:    rgba(178, 58, 36, 0.34); /* red margin rule */
+
+  --green:     #4c6444;   /* under / on — calm ledger green */
+  --green-2:   #3c5236;
+  --hl-green:  rgba(126, 166, 96, 0.34);
+
+  --red:       #b23a24;   /* over pace */
+  --red-2:     #8f2417;   /* severe over */
+  --hl-red:    rgba(196, 88, 58, 0.30);
+
+  --serif: Georgia, "Times New Roman", "Noto Serif", serif;
+  --mono:  ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
+  --sans:  ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+
+  /* ONE notebook grid, used by every ruled surface (page, sign-in, About note).
+     Rules sit at y = grid-y + n*lh (bottom pixel of each row). A text row that
+     starts at (rule + row-shift) has its baseline resting on the next rule. */
+  --lh: 34px;          /* ruled-line rhythm */
+  --rule-w: 1px;       /* ruling thickness */
+  --grid-y: 6px;       /* where the first rule falls on a surface */
+  --row-shift: 6px;    /* rule bottom -> top of a 34px text row (baseline on the line) */
+  --margin-x: 26px;    /* red margin rule position */
+  --page-pad-l: 40px;  /* text starts here on every surface */
+  /* Pace wordmark: ONE treatment for the app masthead and the Welcome title */
+  --brand-font: var(--serif); --brand-style: italic; --brand-weight: 700; --brand-tracking: -0.01em;
+  --ledger-rule: linear-gradient(to bottom, transparent calc(var(--lh) - var(--rule-w)), var(--line) calc(var(--lh) - var(--rule-w)));
+}
+
+* { box-sizing: border-box; margin: 0; }
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--serif);
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* ---- the ledger page ------------------------------------------------- */
+
+.page {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  max-width: 430px;
+  margin: 0 auto;
+  padding: 20px 24px calc(22px + env(safe-area-inset-bottom)) var(--page-pad-l);
+  background: var(--ledger-rule) 0 var(--grid-y) / 100% var(--lh) repeat-y var(--paper);
+}
+/* red margin rule down the left */
+.page::before {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0; left: var(--margin-x);
+  width: 1.5px;
+  background: var(--margin);
+}
+
+/* ---- masthead -------------------------------------------------------- */
+
+.masthead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 10px;
+}
+.brand {
+  font-family: var(--brand-font);
+  font-style: var(--brand-style);
+  font-weight: var(--brand-weight);
+  font-size: 27px;
+  letter-spacing: var(--brand-tracking);
+  text-transform: uppercase;   /* same PACE wordmark as the Welcome screen */
+}
+.nav { display: flex; align-items: center; gap: 2px; }
+.nav__link {
+  border: 0; background: none;
+  color: var(--dim);
+  font-family: var(--sans);
+  font-size: 13px;
+  letter-spacing: 0.01em;
+  padding: 10px 7px;
+  min-height: 44px;
+  cursor: pointer;
+  border-bottom: 1.5px solid transparent;
+}
+.nav__link:hover { color: var(--ink); border-bottom-color: var(--ink); }
+.nav__gear { padding: 10px 6px; }
+.nav__gear svg {
+  width: 19px; height: 19px; display: block;
+  fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round;
+}
+
+.dateline {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  color: var(--dim);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--rule);
+}
+
+/* ---- hero: status ---------------------------------------------------- */
+
+.hero { padding: 16px 0 4px; }
+.hero__top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+
+.status {
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: clamp(46px, 16vw, 60px);
+  line-height: 0.92;
+  letter-spacing: -0.01em;
+  text-transform: uppercase;
+  max-width: 5ch;               /* forces UNDER / PACE onto two lines */
+  color: var(--green-2);
+  transition: color 0.3s;
+}
+.is-over .status { color: var(--red); }
+.is-over.sev3 .status { color: var(--red-2); }
+
+/* severe stamp */
+.stamp {
+  flex: none;
+  margin-top: 8px;
+  align-self: flex-start;
+  font-family: var(--sans);
+  font-weight: 700;
+  font-size: 13px;
+  line-height: 1.15;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  text-align: center;
+  color: var(--red-2);
+  border: 2px solid var(--red-2);
+  border-radius: 3px;
+  padding: 7px 11px;
+  transform: rotate(6deg);
+  opacity: 0.9;
+}
+
+.diff {
+  margin-top: 14px;
+  font-size: 17px;
+  line-height: var(--lh);
+}
+.hl {
+  background: transparent;
+  color: var(--ink);
+  padding: 1px 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.is-under .hl, .is-on .hl { background: var(--hl-green); }
+.is-over .hl { background: var(--hl-red); }
+.hl b { font-weight: 700; }
+.is-over .hl b { color: var(--red-2); }
+
+/* ---- pace ------------------------------------------------------------ */
+
+.label {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.pace { padding: 12px 0 6px; }
+.pace__big {
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: clamp(40px, 13vw, 52px);
+  line-height: 1;
+  letter-spacing: -0.01em;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 2px;
+}
+.pace__per { font-size: 0.42em; font-weight: 400; font-style: italic; color: var(--dim); }
+
+.bar {
+  position: relative;
+  height: 20px;
+  margin: 14px 0 10px;
+  border: 1px solid var(--rule);
+  background:
+    repeating-linear-gradient(
+      to right,
+      transparent 0, transparent 13px,
+      var(--rule) 13px, var(--rule) 14px
+    );
+  overflow: hidden;
+}
+.bar__fill {
+  position: absolute;
+  top: 0; left: 0; bottom: 0;
+  width: 0%;
+  background: var(--green);
+  transition: width 0.5s cubic-bezier(0.22, 1, 0.36, 1), background-color 0.3s;
+}
+.is-over .bar__fill { background: var(--red); }
+.is-over.sev3 .bar__fill { background: var(--red-2); }
+.bar__mark {
+  position: absolute;
+  top: -3px; bottom: -3px;
+  left: 60%;                    /* "today's line" */
+  width: 2px;
+  background: var(--ink);
+}
+
+.pace__row {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.pace__spent b, .pace__left b { font-weight: 700; }
+.pace__left.over { color: var(--red); }
+
+/* ---- meta rows ------------------------------------------------------- */
+
+.meta { padding: 8px 0 4px; }
+.meta__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: var(--lh);
+}
+.meta .k {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.meta__v { display: inline-flex; align-items: baseline; gap: 9px; }
+.meta .v {
+  font-family: var(--mono);
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+.is-over #tom { color: var(--red); }
+.delta {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+  letter-spacing: 0.01em;
+}
+.delta.drop { color: var(--red); }
+.delta.rise { color: var(--green-2); }
+
+/* ---- today's expenses ------------------------------------------------ */
+
+.today {
+  padding: 8px 0 4px;
+  border-top: 1px solid var(--rule);
+  margin-top: 6px;
+}
+.today__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  min-height: var(--lh);
+}
+.seeall {
+  border: 0; background: none;
+  color: var(--dim);
+  font-family: var(--sans);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 8px 0 8px 8px;
+  min-height: 40px;
+}
+.seeall:hover { color: var(--ink); text-decoration: underline; }
+.entries { list-style: none; }
+.entries li {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-height: var(--lh);
+  border-bottom: 1px dotted var(--rule-dot);
+}
+.entries .n {
+  flex: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 16px;
+}
+.entries .a {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+.entries .empty {
+  min-height: var(--lh);
+  display: flex; align-items: center;
+  font-style: italic;
+  color: var(--dim);
+  font-size: 16px;
+}
+
+/* ---- footer action --------------------------------------------------- */
+
+.err {
+  margin-top: 12px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--red);
+}
+
+.log {
+  margin-top: 18px;
+  width: 100%;
+  min-height: 54px;
+  border: 1.5px solid var(--ink);
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 19px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.log:hover { background: var(--ink); color: var(--paper); }
+.log__plus { font-family: var(--mono); font-style: normal; font-size: 20px; }
+
+/* skeleton before data lands */
+[data-state="boot"] .status,
+[data-state="boot"] #todayPace,
+[data-state="boot"] .v,
+[data-state="boot"] .pace__spent,
+[data-state="boot"] .pace__left { color: var(--rule); }
+
+/* ---- bottom sheet ---------------------------------------------------- */
+
+.sheet { position: fixed; inset: 0; z-index: 40; }
+.sheet__scrim {
+  position: absolute; inset: 0;
+  background: rgba(30, 26, 20, 0.38);
+  opacity: 0;
+  transition: opacity 0.22s;
+}
+.sheet.open .sheet__scrim { opacity: 1; }
+.sheet__card {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  max-width: 430px;
+  margin: 0 auto;
+  background: var(--paper-2);
+  border-top: 2px solid var(--ink);
+  padding: 14px 24px calc(26px + env(safe-area-inset-bottom));
+  max-height: 82dvh;
+  overflow-y: auto;
+  transform: translateY(101%);
+  transition: transform 0.26s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.sheet.open .sheet__card { transform: none; }
+.sheet__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-bottom: 12px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--rule);
+}
+.sheet__head h2 {
+  font-family: var(--serif);
+  font-style: italic;
+  font-weight: 700;
+  font-size: 22px;
+}
+.sheet__x {
+  border: 0; background: none;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 8px; margin-right: -8px;
+  min-height: 44px;
+}
+.sheet__x:hover { color: var(--ink); text-decoration: underline; }
+
+.rows > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 11px 0;
+  border-bottom: 1px dotted var(--rule-dot);
+}
+.rows .rk { font-family: var(--sans); font-size: 13px; color: var(--dim); }
+.rows .rv { font-family: var(--mono); font-size: 15px; font-variant-numeric: tabular-nums; text-align: right; }
+.rows .rv.over { color: var(--red); }
+.cur-select {
+  font-family: var(--mono); font-size: 14px; color: var(--ink);
+  background: var(--paper); border: 1px solid var(--rule);
+  padding: 8px 10px; min-height: 44px; cursor: pointer; text-align: right;
+}
+.cur-select:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
+.big-num { font-family: var(--mono); font-size: 42px; font-variant-numeric: tabular-nums; padding: 16px 0 4px; letter-spacing: -0.02em; }
+.note-line { font-size: 13px; color: var(--dim); line-height: 1.5; padding-bottom: 6px; font-family: var(--sans); }
+.hint { font-size: 12px; color: var(--dim); padding-top: 14px; line-height: 1.5; font-family: var(--sans); }
+.txlist { list-style: none; }
+.txlist li { display: flex; align-items: baseline; gap: 12px; padding: 11px 0; border-bottom: 1px dotted var(--rule-dot); }
+.txlist .a { font-family: var(--mono); font-size: 15px; font-variant-numeric: tabular-nums; min-width: 66px; }
+.txlist .n { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+.txempty { padding: 22px 0 6px; color: var(--dim); font-style: italic; font-size: 16px; }
+
+/* add-expense form — writing a new line into the ledger */
+.form { padding: 14px 0 2px; }
+.amount { display: flex; align-items: baseline; border-bottom: 2px solid var(--ink); padding-bottom: 6px; margin-bottom: 16px; }
+.amount span { font-family: var(--mono); font-size: 32px; color: var(--dim); padding-right: 8px; }
+.amount input { flex: 1; min-width: 0; border: 0; background: none; outline: none; color: var(--ink); font-family: var(--mono); font-size: 34px; font-variant-numeric: tabular-nums; }
+.note-field { width: 100%; border: 0; border-bottom: 1px solid var(--rule); background: none; outline: none; color: var(--ink); font-family: var(--sans); font-size: 15px; padding: 10px 0; margin-bottom: 20px; }
+.amount input::placeholder, .note-field::placeholder { color: var(--dim); opacity: 0.7; }
+.submit { width: 100%; min-height: 50px; border: 1.5px solid var(--ink); background: var(--ink); color: var(--paper); font-family: var(--serif); font-style: italic; font-size: 18px; cursor: pointer; }
+.submit:hover:not(:disabled) { background: transparent; color: var(--ink); }
+.submit:disabled { opacity: 0.55; cursor: default; }
+.form-msg { margin-top: 12px; font-family: var(--mono); font-size: 12.5px; }
+.form-msg.ok { color: var(--green-2); }
+.form-msg.err { color: var(--red); }
+
+/* large-expense confirmation — sits inside the existing sheet (Expense Safety 1) */
+.confirm { padding: 8px 0 4px; }
+.confirm__kicker { font-family: var(--mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--red); }
+.confirm__amount { font-family: var(--serif); font-weight: 700; font-size: 40px; line-height: 1; margin-top: 4px; color: var(--red); letter-spacing: -0.01em; }
+.confirm__body { font-family: var(--sans); font-size: 14px; line-height: 1.55; color: var(--ink); padding-top: 12px; }
+.confirm__ask { font-family: var(--serif); font-style: italic; font-size: 18px; padding-top: 12px; }
+.confirm__actions { display: flex; gap: 12px; margin-top: 18px; }
+.confirm__cancel, .confirm__go { flex: 1; min-height: 50px; cursor: pointer; font-family: var(--serif); font-style: italic; font-size: 17px; }
+.confirm__cancel { border: 1.5px solid var(--ink); background: transparent; color: var(--ink); }
+.confirm__cancel:hover { background: var(--ink); color: var(--paper); }
+.confirm__go { border: 1.5px solid var(--red); background: var(--red); color: var(--paper); }
+.confirm__go:hover:not(:disabled) { background: transparent; color: var(--red); }
+.confirm__go:disabled { opacity: 0.55; cursor: default; }
+
+/* today's-entries rows with Edit / Delete (Expense Safety 2) */
+.txrow { display: flex; align-items: center; gap: 12px; }
+.txrow .a { min-width: 66px; }
+.txrow .n { flex: 1; }
+.txactions { display: inline-flex; gap: 4px; flex: none; }
+.txbtn {
+  min-height: 44px; padding: 6px 10px; cursor: pointer;
+  border: 1px solid var(--rule); background: transparent; color: var(--dim);
+  font-family: var(--sans); font-size: 13px;
+}
+.txbtn:hover:not(:disabled) { color: var(--ink); border-color: var(--ink); }
+.txbtn:disabled { opacity: 0.4; cursor: default; }
+.txbtn--del { color: var(--red); border-color: rgba(178, 58, 36, 0.4); }
+.txbtn--del:hover:not(:disabled) { color: var(--paper); background: var(--red); border-color: var(--red); }
+
+.txedit { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; padding: 6px 0; }
+.txedit__amt { width: 90px; }
+.txedit__note { flex: 1; min-width: 120px; }
+.txedit input {
+  border: 0; border-bottom: 1px solid var(--rule); background: none; outline: none;
+  color: var(--ink); font-family: var(--mono); font-size: 15px; padding: 8px 0;
+}
+.txedit .form-msg { flex-basis: 100%; }
+
+.txconfirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; padding: 6px 0; }
+.txconfirm__q { flex: 1; min-width: 140px; font-style: italic; font-size: 15px; color: var(--ink); }
+
+/* ---- a11y & motion --------------------------------------------------- */
+
+:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
+
+/* The new row is visible from the first frame (never opacity:0) — a short
+   settle only, so it never reads as "appearing late". */
+.entries li.ink-in { animation: ink-in 0.18s ease-out; }
+@keyframes ink-in {
+  from { opacity: 0.55; transform: translateY(-2px); }
+  to   { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar__fill { transition: none; }
+  *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}
+
+/* ---- wider screens: a centered notebook page ------------------------- */
+@media (min-width: 560px) {
+  body {
+    display: grid;
+    place-items: center;
+    padding: 5vh 0;
+    background: color-mix(in srgb, var(--paper) 82%, #000);
+  }
+  @supports not (background: color-mix(in srgb, red, blue)) { body { background: #ddd5c0; } }
+  .page {
+    min-height: 660px;
+    border: 1px solid var(--rule);
+    box-shadow: 0 18px 50px rgba(40, 32, 20, 0.28);
+  }
+}
+
+/* ---- access gate (Multi-User V1) — same ledger paper, no SaaS login card -- */
+.gate__brand {
+  font-family: var(--serif); font-style: italic; font-weight: 700;
+  font-size: 44px; letter-spacing: -0.01em; line-height: 1;
+}
+.gate__lede { font-family: var(--serif); font-size: 19px; padding: 10px 0 22px; color: var(--ink); }
+.gate__choices { display: flex; flex-direction: column; gap: 12px; }
+.gate__btn, .gate__go, .gate__back {
+  min-height: 54px; cursor: pointer; width: 100%;
+  border: 1.5px solid var(--ink); background: transparent; color: var(--ink);
+  font-family: var(--serif); font-style: italic; font-size: 19px;
+}
+.gate__btn:hover, .gate__go:hover:not(:disabled) { background: var(--ink); color: var(--paper); }
+.gate__btn--guest { border-color: var(--dim); color: var(--dim); }
+.gate__btn--guest:hover { background: var(--dim); color: var(--paper); }
+.gate__note { font-family: var(--mono); font-size: 11px; color: var(--dim); padding-top: 4px; }
+.gate__who { font-family: var(--serif); font-size: 18px; padding-bottom: 14px; }
+.gate__who .label { display: block; padding-bottom: 2px; }
+.gate__code {
+  display: block; width: 100%; margin: 6px 0 4px;
+  border: 0; border-bottom: 2px solid var(--ink); background: none; outline: none;
+  color: var(--ink); font-family: var(--mono); font-size: 22px; letter-spacing: 0.08em; padding: 8px 0;
+}
+.gate__err { font-family: var(--mono); font-size: 12.5px; color: var(--red); padding-top: 8px; }
+.gate__actions { display: flex; gap: 12px; margin-top: 18px; }
+.gate__go { background: var(--ink); color: var(--paper); }
+.gate__go:disabled { opacity: 0.55; cursor: default; }
+.gate__back { border-color: var(--rule); color: var(--dim); }
+
+.tag {
+  font-family: var(--mono); font-style: normal; font-weight: 400; font-size: 10px;
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--red);
+  border: 1px solid var(--red); padding: 1px 6px; margin-left: 10px; vertical-align: middle;
+}
+.acct { display: flex; gap: 10px; padding-top: 16px; }
+
+/* ---- Welcome (the front door): one ledger page ----------------------------- */
+/* Every block below starts/ends on the canonical grid: text rows start at
+   (rule + --row-shift), headings end exactly on a rule, the drawing spans whole rows. */
+.gate { justify-content: flex-start; padding-top: calc(var(--grid-y) + var(--row-shift) + var(--lh)); }
+.welcome, .gate__form { display: flex; flex-direction: column; }
+.trajectory {
+  display: block; width: 100%; --traj-rows: 4; height: calc(var(--lh) * var(--traj-rows));
+  color: var(--ink); overflow: visible; pointer-events: none;
+}
+@media (max-height: 720px) { .trajectory { --traj-rows: 3; } }
+.traj__ink--soft { opacity: 0.3; }
+.traj__today text, .traj__notes text { font-family: var(--serif); font-style: italic; font-size: 13px; fill: var(--dim); }
+.traj__notes text { font-size: 12px; }
+/* two small handwritten margin notes from the approved reference (decorative, never interactive) */
+.welcome__note {
+  position: absolute; margin: 0; pointer-events: none; text-align: right;
+  font-family: var(--serif); font-style: italic; font-size: 13px; line-height: 1.2; color: var(--dim);
+  transform: rotate(-6deg); transform-origin: right bottom;
+}
+.welcome__note::after {
+  content: ""; display: block; width: 38px; height: 7px; margin: 3px 0 0 auto;
+  border-bottom: 1.5px solid var(--dim); border-radius: 0 0 70% 30%; transform: rotate(-6deg); opacity: 0.8;
+}
+.welcome__note--top { top: 8px; right: 22px; }
+.welcome__note--bottom { bottom: calc(14px + env(safe-area-inset-bottom)); right: 22px; }
+
+.ledger-head, .welcome .gate__brand, .signin__title {   /* two rows tall, its rule lies ON a notebook rule */
+  display: flex; align-items: flex-end; box-sizing: border-box;
+  height: calc(var(--lh) * 2 - var(--row-shift)); padding-bottom: var(--head-pb, 0);
+  border-bottom: 1.5px solid var(--ink); line-height: 1;
+  font-family: var(--serif); color: var(--ink);
+}
+.welcome .gate__brand { font-family: var(--brand-font); font-size: 66px; letter-spacing: var(--brand-tracking); font-style: var(--brand-style); font-weight: var(--brand-weight); --head-pb: 2px; }
+.signin__title { font-size: 34px; letter-spacing: 0.14em; font-weight: 400; --head-pb: 4px; margin: calc(var(--lh) * 2) 0 0; }
+.welcome__tag {
+  font-family: var(--serif); font-weight: 400; font-size: 30px; line-height: var(--lh);   /* one row per line: baseline on the rule */
+  margin: calc(var(--row-shift) + var(--lh)) 0 0; padding: 0; color: var(--ink);
+}
+.welcome__lede { font-family: var(--serif); font-size: 17px; line-height: var(--lh); color: var(--dim); margin: var(--lh) 0 0; padding: 0; }
+.welcome .gate__err { line-height: var(--lh); padding: 0; margin: var(--lh) 0 0; }
+.gate__choices { gap: 14px; margin-top: var(--lh); }
+.gate__btn, .gate__go { letter-spacing: 0.14em; font-style: normal; font-size: 15px; padding: 0 20px; transition: background 0.14s, color 0.14s, transform 0.08s; }
+.gate__btn--primary { background: var(--ink); color: var(--paper); min-height: 56px; }
+.gate__btn--primary:hover { background: transparent; color: var(--ink); }
+.gate__btn--guest { border-color: var(--ink); color: var(--ink); min-height: 52px; background: var(--paper); }   /* outlined, clearly not disabled */
+.gate__btn--guest:hover { background: var(--ink); color: var(--paper); }
+.gate__btn:active, .gate__go:active, .gate__back:active { transform: translateY(1px); }
+.gate__btn:focus-visible, .gate__go:focus-visible, .gate__back:focus-visible, .welcome__info:focus-visible, .gate__code:focus-visible {
+  outline: 2px solid var(--ink); outline-offset: 3px;
+}
+.welcome__info {
+  align-self: flex-start; margin: 12px 0 0 -10px; width: 44px; height: 44px;
+  border: 0; background: none; color: var(--dim); font-size: 22px; line-height: 1; cursor: pointer;
+}
+.welcome__info:hover { color: var(--ink); }
+
+/* sign in: the next page of the same notebook */
+.gate__form .label { display: block; height: var(--lh); line-height: var(--lh); margin: calc(var(--row-shift) + var(--lh)) 0 0; padding: 0; }
+.gate__code {   /* two rows tall; its ink underline lies on a rule */
+  box-sizing: border-box; height: calc(var(--lh) * 2 - var(--row-shift)); margin: 0; padding: 22px 2px 0;
+  font-size: 24px; caret-color: var(--red); background: none;
+}
+.gate__form .gate__err { line-height: var(--lh); padding: 0; margin: var(--row-shift) 0 0; }
+.gate__actions { flex-direction: column; gap: 6px; margin-top: 24px; }
+.gate__go { min-height: 56px; }
+.gate__back { width: auto; align-self: flex-start; min-height: 44px; border: 0; background: none; color: var(--dim); font-size: 17px; padding: 0 2px; text-decoration: underline; text-underline-offset: 3px; }
+.gate__back:hover { color: var(--ink); }
+
+/* motion: quiet, paper-like, fast (reduced-motion is handled globally above) */
+@keyframes ink-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes paper-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes ink-draw { from { stroke-dashoffset: 1; opacity: 0; } 1% { opacity: 1; } to { stroke-dashoffset: 0; opacity: 1; } }
+@keyframes ink-settle { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.traj__ink { stroke-dasharray: 1 1; stroke-dashoffset: 0; }
+.gate.intro-page { animation: paper-in 0.16s ease-out backwards; }
+.welcome.intro .traj__ink { animation: ink-draw 0.34s ease-in-out 0.06s backwards; }
+.welcome.intro .traj__ink--soft { animation-delay: 0.1s; }
+.welcome.intro .traj__today, .welcome.intro .traj__notes { animation: ink-settle 0.16s ease-out 0.4s backwards; }
+.welcome.intro .welcome__note { animation: paper-in 0.16s ease-out 0.74s backwards; }
+.welcome.intro .gate__brand, .welcome.intro .welcome__tag, .welcome.intro .welcome__lede,
+.welcome.intro .gate__btn, .welcome.intro .welcome__info { animation: ink-in 0.2s ease-out backwards; }
+.welcome.intro .gate__brand { animation-delay: 0.50s; }
+.welcome.intro .welcome__tag { animation-delay: 0.55s; }
+.welcome.intro .welcome__lede { animation-delay: 0.60s; }
+.welcome.intro .gate__btn--primary { animation-delay: 0.65s; }
+.welcome.intro .gate__btn--guest { animation-delay: 0.68s; }
+.welcome.intro .welcome__info { animation-delay: 0.71s; }
+.welcome.leave, .gate__form.leave { opacity: 0; transform: translateY(-4px); transition: opacity 0.09s ease-in, transform 0.09s ease-in; }
+.welcome.enter, .gate__form.enter { animation: ink-in 0.18s ease-out backwards; }
+
+/* About: ruled paper laid on the ledger - same grid, same margin, same text edge */
+.sheet__card--note {
+  left: 12px; right: 12px; bottom: 12px; max-width: 406px;
+  padding: calc(var(--grid-y) + var(--row-shift)) 24px 22px calc(var(--page-pad-l) - 13px);
+  border: 1px solid var(--rule); border-top: 2px solid var(--ink);
+  background-color: var(--paper-2);
+  background-image: linear-gradient(var(--margin), var(--margin)), var(--ledger-rule);
+  background-repeat: no-repeat, repeat-y;
+  background-size: 1.5px 100%, 100% var(--lh);
+  background-position: calc(var(--margin-x) - 13px) 0, 0 var(--grid-y);
+  background-attachment: local;
+  box-shadow: 0 10px 26px rgba(43, 39, 33, 0.16), 0 1px 0 rgba(43, 39, 33, 0.06);
+}
+.sheet__card--note .sheet__head {
+  align-items: flex-end; box-sizing: border-box; height: calc(var(--lh) * 2 - var(--row-shift));
+  margin: 0 0 var(--row-shift); padding: 0 0 4px; border-bottom: 1.5px solid var(--ink);
+}
+.sheet__card--note .sheet__head h2 { line-height: 1; }
+.about p { font-family: var(--serif); font-size: 15px; line-height: var(--lh); margin: 0; padding: 0; }
+.about__steps { font-style: italic; margin: var(--lh) 0 !important; }
+.about__close { font-style: italic; color: var(--dim); }
+
+/* ---- Money Plan: the first page of the ledger ----------------------------- */
+.plan { justify-content: flex-start; }
+.plan__head { display: flex; align-items: center; justify-content: space-between; padding-bottom: 8px; }
+.plan__title { font-family: var(--serif); font-weight: 400; font-size: 32px; line-height: var(--lh); padding: 14px 0 4px; }
+.plan__step { padding-bottom: 6px; }
+.plan__body { flex: 1; padding-top: 12px; }
+.plan__q { font-family: var(--serif); font-style: italic; font-size: 19px; line-height: var(--lh); padding-bottom: 10px; }
+.plan__hint { padding: 0 0 8px; }
+.plan__field { padding-bottom: 14px; }
+.plan__field .amount { margin-top: 4px; }
+.plan__list { list-style: none; padding: 0; margin: 0; }
+.plan__row { display: flex; gap: 8px; align-items: center; min-height: var(--lh); padding: 4px 0; border-bottom: 1px dotted var(--rule-dot); }
+.plan__name, .plan__amt { border: 0; background: none; outline: none; color: var(--ink); min-height: 40px; min-width: 0; }
+.plan__name { flex: 1; font-family: var(--serif); font-size: 17px; }
+.plan__amt { width: 96px; text-align: right; font-family: var(--mono); font-size: 16px; font-variant-numeric: tabular-nums; }
+.plan__name::placeholder, .plan__amt::placeholder { color: var(--dim); opacity: 0.6; }
+.plan__name:focus, .plan__amt:focus { background: var(--hl-green); }
+.plan__add { min-height: 44px; border: 0; background: none; color: var(--green-2); font-family: var(--serif); font-style: italic; font-size: 16px; cursor: pointer; padding: 6px 0; text-align: left; }
+.plan__add:hover { text-decoration: underline; }
+.plan__sum { display: flex; justify-content: space-between; align-items: baseline; padding-top: 10px; border-top: 1.5px solid var(--ink); margin-top: 6px; font-family: var(--sans); font-size: 13px; color: var(--dim); }
+.plan__total { font-family: var(--mono); font-size: 17px; color: var(--ink); font-variant-numeric: tabular-nums; }
+.plan__ledger > div { padding: 6px 0; }
+.plan__avail { border-top: 1.5px solid var(--ink); margin-top: 6px; padding-top: 10px; }
+.plan__avail .rk { color: var(--ink); font-size: 14px; }
+.plan__avail .rv { font-size: 19px; font-weight: 600; }
+.plan__pace { display: flex; flex-direction: column; gap: 2px; padding-top: 22px; font-family: var(--mono); font-size: 12.5px; color: var(--dim); }
+.plan__pace-v { font-family: var(--mono); font-size: 34px; color: var(--ink); font-variant-numeric: tabular-nums; }
+.plan__pace-n { font-family: var(--sans); font-size: 12px; }
+.plan__pace.is-err { color: var(--red); }
+.plan__err { font-family: var(--mono); font-size: 12.5px; color: var(--red); padding-top: 12px; }
+.plan__actions { padding-top: 18px; }
+.plan__actions .gate__go, .plan__actions .gate__back { flex: 1; }
+.plan__actions .gate__go, .plan__actions .gate__back { font-size: 17px; white-space: nowrap; }

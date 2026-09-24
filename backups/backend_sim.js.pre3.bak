@@ -1,0 +1,753 @@
+/* Offline simulation of the multi-user Apps Script backend.
+ * Loads the REAL apps-script/Code.gs into a vm with mocked Apps Script services
+ * (in-memory spreadsheet, real SHA-256 / HMAC) and runs the isolation matrix.
+ * Run: node tests/backend_sim.js   (exit code != 0 on any failure)
+ */
+const fs = require('fs');
+const vm = require('vm');
+const crypto = require('crypto');
+const path = require('path');
+
+const CODE = fs.readFileSync(path.join(__dirname, '..', 'apps-script', 'Code.gs'), 'utf8');
+const OLD = fs.readFileSync(path.join(__dirname, '..', 'apps-script', 'Code.gs.v8.bak'), 'utf8');
+
+// ---------- mocks ----------
+function signed(buf) { return Array.from(buf, b => (b > 127 ? b - 256 : b)); }
+function unsigned(arr) { return Buffer.from(Array.from(arr, b => b & 255)); }
+
+class Sheet {
+  constructor(ss, name) { this.ss = ss; this.name = name; this.rows = []; this.frozen = 0; }
+  getName() { return this.name; }
+  setName(n) { this.name = n; }
+  setFrozenRows(n) { this.frozen = n; }
+  getLastRow() {
+    let last = 0;
+    this.rows.forEach((r, i) => { if (r && r.some(c => c !== '' && c !== undefined && c !== null)) last = i + 1; });
+    return last;
+  }
+  getRange(r, c, nr, nc) {
+    nr = nr || 1; nc = nc || 1; const self = this;
+    return {
+      getValues() {
+        const out = [];
+        for (let i = 0; i < nr; i++) { const row = []; for (let j = 0; j < nc; j++) { const v = (self.rows[r - 1 + i] || [])[c - 1 + j]; row.push(v === undefined ? '' : v); } out.push(row); }
+        return out;
+      },
+      getValue() { const v = (self.rows[r - 1] || [])[c - 1]; return v === undefined ? '' : v; },
+      setValues(vals) {
+        for (let i = 0; i < vals.length; i++) { self.rows[r - 1 + i] = self.rows[r - 1 + i] || []; for (let j = 0; j < vals[i].length; j++) self.rows[r - 1 + i][c - 1 + j] = vals[i][j]; }
+      },
+      setValue(v) { self.rows[r - 1] = self.rows[r - 1] || []; self.rows[r - 1][c - 1] = v; }
+    };
+  }
+  appendRow(arr) { this.rows[this.getLastRow()] = arr.slice(); }
+  deleteRow(n) { this.rows.splice(n - 1, 1); }
+  deleteRows(n, count) { this.rows.splice(n - 1, count); }
+  copyTo(ss) { const s = ss.insertSheet('Copy of ' + this.name); s.rows = JSON.parse(JSON.stringify(this.rows)); return s; }
+}
+class Spreadsheet {
+  constructor() { this.sheets = {}; }
+  getSheetByName(n) { return this.sheets[n] || null; }
+  insertSheet(n) { const s = new Sheet(this, n); this.sheets[n] = s; return s; }
+  // keep name index in sync after setName
+  sync() { const m = {}; Object.values(this.sheets).forEach(s => m[s.name] = s); this.sheets = m; }
+}
+
+function makeEnv(ss) {
+  const cacheStore = {}; const props = {};
+  const ctx = {
+    console, Date, Math, JSON, String, Number, Object, Array, isNaN, isFinite, parseInt, RegExp, Error,
+    Logger: { log() {} },
+    Session: { getScriptTimeZone: () => 'Asia/Kolkata' },
+    SpreadsheetApp: { getActiveSpreadsheet: () => { ss.sync(); return ss; } },
+    LockService: { getScriptLock: () => ({ waitLock() {}, tryLock() { return true; }, releaseLock() {} }) },
+    CacheService: { getScriptCache: () => ({ get: k => (k in cacheStore ? cacheStore[k] : null), put: (k, v) => { cacheStore[k] = String(v); }, remove: k => { delete cacheStore[k]; } }) },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: k => (k in props ? props[k] : null), setProperty: (k, v) => { props[k] = v; } }) },
+    ContentService: { MimeType: { JSON: 'json' }, createTextOutput: s => ({ setMimeType() { return this; }, getContent: () => s }) },
+    Utilities: {
+      DigestAlgorithm: { SHA_256: 'sha256' }, Charset: { UTF_8: 'utf8' },
+      getUuid: () => crypto.randomUUID(),
+      computeDigest: (alg, s) => signed(crypto.createHash('sha256').update(String(s), 'utf8').digest()),
+      computeHmacSha256Signature: (v, k) => signed(crypto.createHmac('sha256', k).update(v).digest()),
+      base64EncodeWebSafe: x => (typeof x === 'string' ? Buffer.from(x, 'utf8') : unsigned(x)).toString('base64').replace(/\+/g, '-').replace(/\//g, '_'),
+      base64DecodeWebSafe: s => signed(Buffer.from(String(s).replace(/-/g, '+').replace(/_/g, '/'), 'base64')),
+      newBlob: bytes => ({ getDataAsString: () => unsigned(bytes).toString('utf8') }),
+      formatDate: (d) => { const p = n => (n < 10 ? '0' : '') + n; return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()); }
+    }
+  };
+  ctx.__cache = cacheStore; ctx.__props = props;
+  vm.createContext(ctx);
+  return ctx;
+}
+
+// ---------- fixtures ----------
+const TODAY = (() => { const d = new Date(); const p = n => (n < 10 ? '0' : '') + n; return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()); })();
+const MONTH1 = TODAY.slice(0, 7) + '-01';
+const uuid = () => crypto.randomUUID();
+
+function buildLegacy(ss) {
+  const s = ss.insertSheet('Settings');
+  s.rows = [['key', 'value'], ['monthly_income', 45000], ['monthly_savings_target', 10000], ['fixed_monthly_expenses', 16500],
+    ['starting_balance', 25000], ['starting_balance_date', MONTH1], ['metro_weekday_cost', 135], ['weekly_auto_cost', 60]];
+  const t = ss.insertSheet('Transactions');
+  t.rows = [['Date', 'Amount', 'Note', 'Type', 'ID'],
+    [TODAY, 150, 'MUH_SECRET_LUNCH', 'expense', uuid()],
+    [TODAY, 80, 'MUH_SECRET_METRO', 'expense', uuid()],
+    [MONTH1, 999, 'MUH_SECRET_BIG', 'expense', uuid()],
+    [MONTH1, 20, 'MUH_SECRET_NOID', 'expense', '']];      // legacy row without id -> must get one
+  return ss;
+}
+
+const CODES = { MUHAMMED: crypto.randomBytes(12).toString('hex'), FRIEND: crypto.randomBytes(12).toString('hex') };
+const H = c => crypto.createHash('sha256').update(c, 'utf8').digest('hex');
+
+function setup() {
+  const ss = new Spreadsheet(); buildLegacy(ss);
+  const env = makeEnv(ss); vm.runInContext(CODE, env);
+  env.migrateToMultiUser(); ss.sync();
+  const u = ss.getSheetByName('USERS');
+  u.getRange(2, 2, 1, 1).setValues([[H(CODES.MUHAMMED)]]);
+  u.getRange(3, 2, 1, 1).setValues([[H(CODES.FRIEND)]]);
+  env.CacheService.getScriptCache().remove('USERS_META_V1');
+  return { ss, env };
+}
+
+function call(env, body) {
+  const out = env.doPost({ postData: { contents: JSON.stringify(body) } });
+  return JSON.parse(out.getContent());
+}
+
+// ---------- tiny test runner ----------
+let pass = 0, fail = 0;
+function ok(name, cond, extra) { if (cond) { pass++; console.log('  PASS  ' + name); } else { fail++; console.log('  FAIL  ' + name + (extra ? '  -> ' + extra : '')); } }
+
+function main() {
+  const { ss, env } = setup();
+  const legacyBefore = JSON.stringify(ss.getSheetByName('Transactions').rows) + JSON.stringify(ss.getSheetByName('Settings').rows);
+
+  console.log('\n== Migration ==');
+  const txm = ss.getSheetByName('TX_MUH');
+  ok('TX_MUH exists with legacy row count', txm && txm.getLastRow() === 5, 'rows=' + (txm && txm.getLastRow()));
+  const legacyRows = ss.getSheetByName('Transactions').rows;
+  let same = true;
+  for (let i = 1; i < legacyRows.length; i++) {
+    for (let c = 0; c < 4; c++) if (String(legacyRows[i][c]) !== String(txm.rows[i][c])) same = false;
+  }
+  ok('date/amount/note/type identical to legacy', same);
+  const idsPresent = txm.rows.slice(1).every(r => r[4]);
+  ok('every TX_MUH row has an id (legacy id kept, missing filled)', idsPresent);
+  ok('existing legacy ids preserved verbatim', [1, 2, 3].every(i => txm.rows[i][4] === legacyRows[i][4]));
+  ok('legacy Transactions/Settings tabs still present', ss.getSheetByName('Transactions') && ss.getSheetByName('Settings'));
+  ok('legacy tabs unchanged by migration (values)', JSON.stringify(legacyRows) === JSON.stringify(ss.getSheetByName('Transactions').rows));
+  const beforeRerun = JSON.stringify(txm.rows);
+  env.migrateToMultiUser(); ss.sync();
+  ok('re-running migration does not overwrite TX_MUH', JSON.stringify(ss.getSheetByName('TX_MUH').rows) === beforeRerun);
+  ok('friend tab starts empty', ss.getSheetByName('TX_FRIEND').getLastRow() === 1);
+  ok('guest tab has demo rows', ss.getSheetByName('TX_GUEST').getLastRow() > 1);
+  ok('guest demo has no Muhammed data', !JSON.stringify(ss.getSheetByName('TX_GUEST').rows).includes('MUH_SECRET'));
+
+  console.log('\n== Login / sessions ==');
+  const loginM = call(env, { action: 'login', profile: 'MUHAMMED', code: CODES.MUHAMMED });
+  const loginF = call(env, { action: 'login', profile: 'FRIEND', code: CODES.FRIEND });
+  const guest = call(env, { action: 'guest' });
+  ok('Muhammed login ok', loginM.ok && loginM.data.token && loginM.data.user === 'MUHAMMED');
+  ok('Friend login ok', loginF.ok && loginF.data.user === 'FRIEND');
+  ok('Guest session without code', guest.ok && guest.data.user === 'GUEST' && guest.data.mode === 'guest');
+  const TM = loginM.data.token, TF = loginF.data.token, TG = guest.data.token;
+  ok('login response never contains the code or a hash', !JSON.stringify(loginM).includes(CODES.MUHAMMED) && !JSON.stringify(loginM).includes(H(CODES.MUHAMMED)));
+  ok('wrong code rejected', !call(env, { action: 'login', profile: 'MUHAMMED', code: 'nope' }).ok);
+  ok("friend's code does NOT open Muhammed's profile", !call(env, { action: 'login', profile: 'MUHAMMED', code: CODES.FRIEND }).ok);
+  ok("Muhammed's code does NOT open friend's profile", !call(env, { action: 'login', profile: 'FRIEND', code: CODES.MUHAMMED }).ok);
+  ok('cannot log in as GUEST via code path', !call(env, { action: 'login', profile: 'GUEST', code: 'x' }).ok);
+  ok('unknown profile rejected', !call(env, { action: 'login', profile: 'ADMIN', code: 'x' }).ok);
+  ok('empty code rejected', !call(env, { action: 'login', profile: 'MUHAMMED', code: '' }).ok);
+
+  console.log('\n== Data isolation (reads) ==');
+  const allM = call(env, { action: 'all', token: TM, today: TODAY });
+  const allF = call(env, { action: 'all', token: TF, today: TODAY });
+  const allG = call(env, { action: 'all', token: TG, today: TODAY });
+  ok('1. Muhammed sees only his data (4 tx, MUH notes)', allM.ok && allM.data.transactions.length === 4 && allM.data.transactions.every(t => t.note.startsWith('MUH_SECRET')));
+  ok('1b. Muhammed settings = his (income 45000)', allM.data.settings.monthly_income === 45000);
+  ok('2. Friend sees only friend data (0 tx)', allF.ok && allF.data.transactions.length === 0);
+  ok('2b. Friend has own default settings, not Muhammed\'s', allF.data.settings.monthly_income === 30000 && allF.data.settings.starting_balance === 0);
+  ok('3. Guest sees only demo data', allG.ok && allG.data.transactions.length > 0 && !JSON.stringify(allG).includes('MUH_SECRET'));
+  ok('   user info returned matches session', allM.data.user.key === 'MUHAMMED' && allF.data.user.key === 'FRIEND' && allG.data.user.key === 'GUEST');
+  ok('   no hashes / codes / secrets in any response', ![allM, allF, allG].some(r => JSON.stringify(r).match(/access_credential|SESSION_SECRET|[0-9a-f]{64}/)));
+
+  console.log('\n== Client-supplied identity is ignored ==');
+  const spoofUser = call(env, { action: 'all', token: TF, today: TODAY, user_key: 'MUHAMMED', user: 'MUHAMMED', profile: 'MUHAMMED', tx_sheet: 'TX_MUH', settings_sheet: 'SET_MUH', sheet: 'TX_MUH' });
+  ok('4. Friend token + user_key/sheet=Muhammed -> still friend data (0 tx)', spoofUser.ok && spoofUser.data.transactions.length === 0 && spoofUser.data.user.key === 'FRIEND');
+  const spoofAdd = call(env, { action: 'addTransaction', token: TF, user_key: 'MUHAMMED', tx_sheet: 'TX_MUH', today: TODAY, transaction: { amount: 5, note: 'F_SPOOF', sheet: 'TX_MUH', user_key: 'MUHAMMED', tx_sheet: 'TX_MUH' } });
+  ok('9. spoofed add as Friend lands only in TX_FRIEND', spoofAdd.ok && ss.getSheetByName('TX_FRIEND').getLastRow() === 2 && !JSON.stringify(ss.getSheetByName('TX_MUH').rows).includes('F_SPOOF'));
+  ok('   friend tx got a transaction_id', !!spoofAdd.data.transaction.transaction_id);
+
+  console.log('\n== Forged / missing / expired credentials ==');
+  const noTok = call(env, { action: 'all', today: TODAY });
+  ok('no token -> unauthorized', !noTok.ok && noTok.error === 'unauthorized');
+  ok('garbage token -> unauthorized', call(env, { action: 'all', token: 'abc.def' }).error === 'unauthorized');
+  const [pay, sig] = TF.split('.');
+  const forgedPayload = Buffer.from(JSON.stringify({ u: 'MUHAMMED', e: 9999999999 })).toString('base64').replace(/\+/g, '-').replace(/\//g, '_');
+  ok('friend signature on Muhammed payload -> unauthorized', call(env, { action: 'all', token: forgedPayload + '.' + sig }).error === 'unauthorized');
+  ok('unsigned payload (no sig) -> unauthorized', call(env, { action: 'all', token: forgedPayload + '.' }).error === 'unauthorized');
+  ok('payload swapped to another user with own sig fails', call(env, { action: 'all', token: pay + '.' + sig.slice(0, -2) + 'AA' }).error === 'unauthorized');
+  const expired = env.issueToken_('MUHAMMED', -60);
+  ok('expired token -> unauthorized', call(env, { action: 'all', token: expired }).error === 'unauthorized');
+  ok('token for a non-existent user -> unauthorized', call(env, { action: 'all', token: env.issueToken_('NOBODY', 3600) }).error === 'unauthorized');
+  ok('GET all is not available (no token in URLs)', JSON.parse(env.doGet({ parameter: { action: 'all' } }).getContent()).error === 'unauthorized');
+  ok('GET transactions/state/settings denied', ['transactions', 'state', 'settings'].every(a => JSON.parse(env.doGet({ parameter: { action: a } }).getContent()).error === 'unauthorized'));
+  ok('GET ping still works (health)', JSON.parse(env.doGet({ parameter: { action: 'ping' } }).getContent()).ok === true);
+
+  console.log('\n== Cross-user transaction ids (edit / delete / undo) ==');
+  const mRows = call(env, { action: 'all', token: TM, today: TODAY }).data.transactions;
+  const mId = mRows.find(t => t.note === 'MUH_SECRET_LUNCH').transaction_id;
+  const fId = spoofAdd.data.transaction.transaction_id;
+  const snapM = JSON.stringify(ss.getSheetByName('TX_MUH').rows);
+  const snapF = JSON.stringify(ss.getSheetByName('TX_FRIEND').rows);
+  const fDelM = call(env, { action: 'deleteTransaction', token: TF, today: TODAY, transaction: { transaction_id: mId } });
+  ok('5. Friend cannot delete Muhammed tx (not found / no-op)', fDelM.ok && fDelM.data.already_absent === true && JSON.stringify(ss.getSheetByName('TX_MUH').rows) === snapM);
+  const fUpdM = call(env, { action: 'updateTransaction', token: TF, today: TODAY, transaction: { transaction_id: mId, amount: 1, note: 'HACK' } });
+  ok('5. Friend cannot edit Muhammed tx', !fUpdM.ok && /not found/.test(fUpdM.error) && JSON.stringify(ss.getSheetByName('TX_MUH').rows) === snapM);
+  const mDelF = call(env, { action: 'deleteTransaction', token: TM, today: TODAY, transaction: { transaction_id: fId } });
+  ok('6. Muhammed cannot delete friend tx', mDelF.ok && mDelF.data.already_absent === true && JSON.stringify(ss.getSheetByName('TX_FRIEND').rows) === snapF);
+  const mUpdF = call(env, { action: 'updateTransaction', token: TM, today: TODAY, transaction: { transaction_id: fId, amount: 1 } });
+  ok('6. Muhammed cannot edit friend tx', !mUpdF.ok && JSON.stringify(ss.getSheetByName('TX_FRIEND').rows) === snapF);
+  ok('7. Guest cannot delete/edit Muhammed tx', call(env, { action: 'deleteTransaction', token: TG, transaction: { transaction_id: mId } }).data.already_absent === true &&
+     !call(env, { action: 'updateTransaction', token: TG, transaction: { transaction_id: mId, amount: 1 } }).ok &&
+     JSON.stringify(ss.getSheetByName('TX_MUH').rows) === snapM);
+  ok('8. Guest cannot delete/edit Friend tx', call(env, { action: 'deleteTransaction', token: TG, transaction: { transaction_id: fId } }).data.already_absent === true &&
+     !call(env, { action: 'updateTransaction', token: TG, transaction: { transaction_id: fId, amount: 1 } }).ok &&
+     JSON.stringify(ss.getSheetByName('TX_FRIEND').rows) === snapF);
+
+  console.log('\n== Writes land only in the caller\'s tab ==');
+  const beforeG = JSON.stringify(ss.getSheetByName('TX_GUEST').rows);
+  const mAdd = call(env, { action: 'addTransaction', token: TM, today: TODAY, transaction: { amount: 77, note: 'M_NEW', type: 'expense', client_id: 'cid1' } });
+  ok('14. Muhammed add -> TX_MUH only', mAdd.ok && ss.getSheetByName('TX_MUH').getLastRow() === 6 && ss.getSheetByName('TX_FRIEND').getLastRow() === 2 && JSON.stringify(ss.getSheetByName('TX_GUEST').rows) === beforeG);
+  const fAdd = call(env, { action: 'addTransaction', token: TF, today: TODAY, transaction: { amount: 88, note: 'F_NEW', type: 'expense', client_id: 'cid1' } });
+  ok('13. Friend add (same client_id!) -> TX_FRIEND only, NOT deduped against Muhammed', fAdd.ok && !fAdd.data.transaction.duplicate && ss.getSheetByName('TX_FRIEND').getLastRow() === 3 && ss.getSheetByName('TX_MUH').getLastRow() === 6);
+  const mDup = call(env, { action: 'addTransaction', token: TM, today: TODAY, transaction: { amount: 77, note: 'M_NEW', type: 'expense', client_id: 'cid1' } });
+  ok('   idempotent retry for same user+client_id -> duplicate, same id, no extra row', mDup.ok && mDup.data.transaction.duplicate === true && mDup.data.transaction.transaction_id === mAdd.data.transaction.transaction_id && ss.getSheetByName('TX_MUH').getLastRow() === 6);
+  const gAdd = call(env, { action: 'addTransaction', token: TG, today: TODAY, transaction: { amount: 5, note: 'G_NEW', type: 'expense' } });
+  ok('   Guest add -> TX_GUEST only', gAdd.ok && ss.getSheetByName('TX_MUH').getLastRow() === 6 && ss.getSheetByName('TX_FRIEND').getLastRow() === 3 && JSON.stringify(ss.getSheetByName('TX_GUEST').rows).includes('G_NEW'));
+  const mEdit = call(env, { action: 'updateTransaction', token: TM, today: TODAY, transaction: { transaction_id: mAdd.data.transaction.transaction_id, amount: 99, note: 'M_EDIT' } });
+  ok('15. own edit works (same id, amount+note)', mEdit.ok && mEdit.data.transaction.transaction_id === mAdd.data.transaction.transaction_id && mEdit.data.transaction.amount === 99 && mEdit.data.transaction.note === 'M_EDIT');
+  const mDel = call(env, { action: 'deleteTransaction', token: TM, today: TODAY, transaction: { transaction_id: mAdd.data.transaction.transaction_id } });
+  ok('15. own delete works, count back', mDel.ok && !mDel.data.already_absent && ss.getSheetByName('TX_MUH').getLastRow() === 5);
+  ok('   Friend state unaffected by Muhammed writes', call(env, { action: 'all', token: TF, today: TODAY }).data.state.actual_spend_to_date === 93);
+
+  console.log('\n== Guest reset ==');
+  ok('resetGuest denied for Muhammed session', !call(env, { action: 'resetGuest', token: TM }).ok && call(env, { action: 'resetGuest', token: TM }).error === 'unauthorized');
+  ok('resetGuest denied for Friend session', call(env, { action: 'resetGuest', token: TF }).error === 'unauthorized');
+  const rg = call(env, { action: 'resetGuest', token: TG, today: TODAY });
+  ok('resetGuest (guest) restores demo, removes G_NEW', rg.ok && !JSON.stringify(rg.data.transactions).includes('G_NEW') && rg.data.transactions.length > 0);
+  ok('resetGuest did not touch Muhammed/Friend tabs', ss.getSheetByName('TX_MUH').getLastRow() === 5 && ss.getSheetByName('TX_FRIEND').getLastRow() === 3);
+  // guest cap
+  const g = ss.getSheetByName('TX_GUEST');
+  for (let i = 0; i < 320; i++) g.appendRow([TODAY, 1, 'x', 'expense', uuid()]);
+  ok('guest tab is capped (add refused when full)', !call(env, { action: 'addTransaction', token: TG, transaction: { amount: 1 } }).ok);
+  call(env, { action: 'resetGuest', token: TG });
+
+  console.log('\n== Brute force / inactive ==');
+  for (let i = 0; i < 8; i++) call(env, { action: 'login', profile: 'FRIEND', code: 'wrong' + i });
+  const locked = call(env, { action: 'login', profile: 'FRIEND', code: CODES.FRIEND });
+  ok('profile locks after repeated failures (even with the right code)', !locked.ok && /too many/.test(locked.error));
+  ok('Muhammed profile unaffected by friend lockout', call(env, { action: 'login', profile: 'MUHAMMED', code: CODES.MUHAMMED }).ok);
+  ss.getSheetByName('USERS').getRange(3, 6, 1, 1).setValues([[false]]);
+  env.CacheService.getScriptCache().remove('USERS_META_V1');
+  ok('deactivated user: existing token rejected', call(env, { action: 'all', token: TF }).error === 'unauthorized');
+  ss.getSheetByName('USERS').getRange(3, 6, 1, 1).setValues([[true]]);
+  env.CacheService.getScriptCache().remove('USERS_META_V1');
+  env.CacheService.getScriptCache().remove('fail_FRIEND');
+
+  console.log('\n== Routing defence-in-depth ==');
+  ss.getSheetByName('USERS').getRange(3, 3, 1, 1).setValues([['USERS']]);   // mis-pointed row must not expose USERS
+  env.CacheService.getScriptCache().remove('USERS_META_V1');
+  ok('a USERS row pointing at a non TX_ tab is refused', call(env, { action: 'all', token: TF }).error === 'unauthorized');
+  ss.getSheetByName('USERS').getRange(3, 3, 1, 1).setValues([['TX_FRIEND']]);
+  env.CacheService.getScriptCache().remove('USERS_META_V1');
+
+  console.log('\n== Pace math unchanged by the refactor ==');
+  const ss2 = new Spreadsheet(); buildLegacy(ss2);
+  const oldEnv = makeEnv(ss2); vm.runInContext(OLD, oldEnv);
+  const oldState = oldEnv.calculateState(TODAY);          // v8 signature: (clientToday)
+  const newState = call(env, { action: 'all', token: TM, today: TODAY }).data.state;
+  // Step 2 (V2 engine) INTENTIONALLY replaces the Pace-defining fields; every other field must still match v8 exactly.
+  const V2_REPLACED = ['daily_allowance', 'today_pace', 'expected_today', 'today_variance', 'remaining_spendable', 'remaining_pace', 'remaining_discretionary', 'safe_daily_for_rest_of_month', 'status'];
+  const keys = Object.keys(oldState).filter(k => k !== 'transaction_count' && V2_REPLACED.indexOf(k) < 0);
+  const diffs = keys.filter(k => JSON.stringify(oldState[k]) !== JSON.stringify(newState[k]));
+  // Muhammed's tab in `env` now has the same rows as legacy except the noted no-id row getting an id (no numeric effect)
+  ok('non-Pace state fields identical to v8 for the same data (' + keys.length + ' fields; the 9 Pace fields are V2-derived since Step 2)', diffs.length === 0, 'diffs: ' + diffs.join(','));
+  ok('Muhammed has no position yet -> V2 gives NO Pace (0 / needs_position), never the old formula', newState.pace_status === 'needs_position' && newState.position_ready === false && newState.today_pace === 0 && oldState.today_pace > 0);
+
+  console.log('\n== Code-only sign-in (profile-agnostic entry) ==');
+  const co = code => call(env, { action: 'login', code });
+  const cM = co(CODES.MUHAMMED), cF = co(CODES.FRIEND);
+  ok('C1. code alone identifies Muhammed', cM.ok && cM.data.user === 'MUHAMMED' && cM.data.mode === 'user');
+  ok('C2. code alone identifies Friend (no profile sent)', cF.ok && cF.data.user === 'FRIEND');
+  ok('C3. token from code-only login opens only that profile', call(env, { action: 'all', token: cF.data.token, today: TODAY }).data.user.key === 'FRIEND');
+  ok('C4. unknown code / empty code rejected', !co('definitely-wrong').ok && !co('').ok && !call(env, { action: 'login' }).ok);
+  ok('C5. a hash is not a code (no hash login)', !co(H(CODES.MUHAMMED)).ok);
+  ok('C6. Guest cannot be reached by a code', !co('guest').ok);
+  ok('C7. response carries no code/hash', !JSON.stringify(cM).includes(CODES.MUHAMMED) && !JSON.stringify(cM).includes(H(CODES.MUHAMMED)));
+  ok('C8. legacy profile+code login still works', call(env, { action: 'login', profile: 'MUHAMMED', code: CODES.MUHAMMED }).ok);
+  ok('C9. legacy profile mismatch still rejected', !call(env, { action: 'login', profile: 'MUHAMMED', code: CODES.FRIEND }).ok);
+  const usersSh = ss.getSheetByName('USERS');
+  usersSh.getRange(7, 1, 1, 6).setValues([['DUPE', H(CODES.FRIEND), 'TX_FRIEND', 'SET_FRIEND', 'user', true]]);
+  env.CacheService.getScriptCache().remove('USERS_META_V1');
+  ok('C10. two users sharing one code -> ambiguous, refused', !co(CODES.FRIEND).ok);
+  usersSh.getRange(7, 1, 1, 6).setValues([['', '', '', '', '', '']]);
+  env.CacheService.getScriptCache().remove('USERS_META_V1');
+  usersSh.getRange(3, 6, 1, 1).setValues([[false]]); env.CacheService.getScriptCache().remove('USERS_META_V1');
+  ok('C11. deactivated user cannot sign in by code', !co(CODES.FRIEND).ok);
+  usersSh.getRange(3, 6, 1, 1).setValues([[true]]); env.CacheService.getScriptCache().remove('USERS_META_V1');
+  ok('C12. re-activated user signs in again', co(CODES.FRIEND).ok);
+  for (let i = 0; i < 8; i++) co('bad' + i);
+  ok('C13. repeated wrong codes lock code-only sign-in', /too many/.test(co(CODES.MUHAMMED).error || ''));
+  env.CacheService.getScriptCache().remove('fail_ANY');
+  ok('C14. lockout clears after the window', co(CODES.MUHAMMED).ok);
+
+  console.log('\n== Money Plan (setup / edit / validation / isolation) ==');
+  const plan = (tok, pl, today) => call(env, { action: 'saveMoneyPlan', token: tok, today: today || TODAY, plan: pl });
+  const PLAN = { income: 58300, savings: 10000, commitments: [{ name: 'Rent', amount: 13500 }, { name: 'Home', amount: 5000 }, { name: 'EMI', amount: 5000 }] };
+  // two brand-new private profiles: NEWA (start date preset to the 1st, no income) and NEWB (completely empty)
+  const uw = ss.getSheetByName('USERS');
+  const NEWCODE = 'newcode-' + crypto.randomBytes(6).toString('hex');
+  uw.getRange(5, 1, 1, 6).setValues([['NEWA', H(NEWCODE), 'TX_NEWA', 'SET_NEWA', 'user', true]]);
+  uw.getRange(6, 1, 1, 6).setValues([['NEWB', H(NEWCODE), 'TX_NEWB', 'SET_NEWB', 'user', true]]);
+  env.CacheService.getScriptCache().remove('USERS_META_V1');
+  const tabNA = ss.insertSheet('SET_NEWA'); tabNA.rows = [['key', 'value'], ['starting_balance_date', MONTH1]];
+  ss.insertSheet('TX_NEWA').rows = [['Date', 'Amount', 'Note', 'Type', 'ID']];
+  ss.insertSheet('SET_NEWB').rows = [['key', 'value']];
+  ss.insertSheet('TX_NEWB').rows = [['Date', 'Amount', 'Note', 'Type', 'ID']];
+  const TA = call(env, { action: 'login', profile: 'NEWA', code: NEWCODE }).data.token;
+  const TB = call(env, { action: 'login', profile: 'NEWB', code: NEWCODE }).data.token;
+
+  const a0 = call(env, { action: 'all', token: TA, today: TODAY });
+  ok('P1. new profile with no income -> needs_setup', a0.ok && a0.data.plan.needs_setup === true);
+  ok('P2. existing valid settings (Muhammed, Friend, Guest) -> NO setup', [TM, TF, TG].every(t => call(env, { action: 'all', token: t, today: TODAY }).data.plan.needs_setup === false));
+  ok('P3. legacy fixed total shown as one editable line, nothing rewritten', (() => { const pm = call(env, { action: 'all', token: TM, today: TODAY }).data.plan; return pm.commitments.length === 1 && pm.commitments[0].amount === 16500 && pm.available === 18500; })());
+
+  // invalid inputs (nothing may be written)
+  const beforeBad = JSON.stringify(ss.getSheetByName('SET_NEWA').rows);
+  const bad = (name, pl) => ok(name, !plan(TA, pl).ok && JSON.stringify(ss.getSheetByName('SET_NEWA').rows) === beforeBad);
+  bad('V1. invalid income (text)', { income: 'abc', savings: 0, commitments: [] });
+  bad('V2. negative income', { income: -1, savings: 0, commitments: [] });
+  bad('V3. missing income', { savings: 0, commitments: [] });
+  bad('V4. invalid savings (negative)', { income: 100, savings: -5, commitments: [] });
+  bad('V5. invalid savings (NaN string)', { income: 100, savings: 'x', commitments: [] });
+  bad('V6. negative commitment amount', { income: 1000, savings: 0, commitments: [{ name: 'Rent', amount: -1 }] });
+  bad('V7. commitment amount not numeric', { income: 1000, savings: 0, commitments: [{ name: 'Rent', amount: 'lots' }] });
+  bad('V8. commitment without a name', { income: 1000, savings: 0, commitments: [{ name: '  ', amount: 5 }] });
+  bad('V9. savings + commitments exceed income', { income: 1000, savings: 600, commitments: [{ name: 'Rent', amount: 500 }] });
+  bad('V10. Infinity / absurd amount', { income: 1e15, savings: 0, commitments: [] });
+  bad('V11. commitments not a list', { income: 1000, savings: 0, commitments: 'rent' });
+  bad('V12. too many commitments', { income: 1e6, savings: 0, commitments: new Array(31).fill({ name: 'x', amount: 1 }) });
+  ok('V13. plan.dry_run also validated', !plan(TA, { income: -1, savings: 0, commitments: [], dry_run: true }).ok);
+
+  // dry run writes nothing but returns the authoritative preview
+  const dry = plan(TA, Object.assign({ dry_run: true }, PLAN));
+  ok('S1. dry_run returns preview, writes nothing', dry.ok && dry.data.dry_run === true && JSON.stringify(ss.getSheetByName('SET_NEWA').rows) === beforeBad && dry.data.plan.available === 24800);
+
+  // deterministic example
+  const sv = plan(TA, PLAN);
+  ok('S2. save ok; plan available = 24,800', sv.ok && sv.data.plan.available === 24800 && sv.data.plan.needs_setup === false);
+  ok('S3. fixed_monthly_expenses = SUM(commitments), computed by the backend', sv.data.settings.fixed_monthly_expenses === 23500 && JSON.parse(sv.data.settings.commitments).length === 3);
+  ok('S4. discretionary_monthly = 24,800', sv.data.state.discretionary_monthly === 24800);
+  const dim = new Date(Number(TODAY.slice(0, 4)), Number(TODAY.slice(5, 7)), 0).getDate(), dom = Number(TODAY.slice(8, 10));
+  ok('S5. total_spendable = 24,800 (period starts on the 1st)', sv.data.state.total_spendable === 24800);
+  const expPace = Math.round((24800 / (dim - dom + 1)) * 100) / 100;
+  ok('S6. (Step 2) profile without a current position gets NO Pace (needs_position), while legacy totals still compute', sv.data.state.pace_status === 'needs_position' && sv.data.state.today_pace === 0 && sv.data.state.total_spendable === 24800);
+  ok('S7. starting_balance_date preset was NOT overwritten', sv.data.settings.starting_balance_date === MONTH1 || String(sv.data.settings.starting_balance_date) === MONTH1);
+  ok('S8. reading back (all) returns the saved plan + settings', (() => { const r = call(env, { action: 'all', token: TA, today: TODAY }).data; return r.plan.income === 58300 && r.plan.savings === 10000 && r.plan.commitments.length === 3 && r.plan.needs_setup === false && r.state.today_pace === sv.data.state.today_pace; })());
+
+  // fresh profile: start date defaults to the client's today, existing values untouched afterwards
+  const sb = plan(TB, PLAN);
+  const fromDay = TODAY;
+  const periodDays = dim - dom + 1;
+  const expTotal = Math.round(24800 * (periodDays / dim) * 100) / 100;
+  ok('S9. fresh profile saves; start date defaults to today; total = 24,800 x period/month', sb.ok && Math.abs(sb.data.state.total_spendable - expTotal) < 0.011 && String(sb.data.settings.starting_balance_date) === fromDay && sb.data.settings.starting_balance === 0, JSON.stringify(sb.data.state && sb.data.state.total_spendable));
+  const startBefore = String(sb.data.settings.starting_balance_date);
+  const sb2 = plan(TB, { income: 60000, savings: 10000, commitments: [{ name: 'Rent', amount: 13500 }] }, TODAY);
+  ok('S10. editing later keeps the start date', sb2.ok && String(sb2.data.settings.starting_balance_date) === startBefore);
+
+  // edits: income, savings, add / edit / delete commitment
+  const e1 = plan(TA, Object.assign({}, PLAN, { income: 60000 }));
+  ok('E1. edit income -> available 26,500', e1.ok && e1.data.plan.available === 26500 && e1.data.state.discretionary_monthly === 26500);
+  const e2 = plan(TA, { income: 60000, savings: 12000, commitments: PLAN.commitments });
+  ok('E2. edit savings -> available 24,500', e2.ok && e2.data.plan.available === 24500);
+  const e3 = plan(TA, { income: 60000, savings: 12000, commitments: PLAN.commitments.concat([{ name: 'Phone', amount: 500 }]) });
+  ok('E3. add commitment -> fixed 24,000, available 24,000', e3.ok && e3.data.plan.fixed === 24000 && e3.data.plan.available === 24000 && e3.data.plan.commitments.length === 4);
+  const e4 = plan(TA, { income: 60000, savings: 12000, commitments: [{ name: 'Rent', amount: 14000 }, PLAN.commitments[1], PLAN.commitments[2], { name: 'Phone', amount: 500 }] });
+  ok('E4. edit commitment -> fixed 24,500', e4.ok && e4.data.plan.fixed === 24500);
+  const e5 = plan(TA, { income: 60000, savings: 12000, commitments: [{ name: 'Rent', amount: 14000 }] });
+  ok('E5. delete commitments -> fixed 14,000, available 34,000', e5.ok && e5.data.plan.fixed === 14000 && e5.data.plan.available === 34000 && e5.data.plan.commitments.length === 1);
+  ok('E6. saved rows: one row per key (no duplicates on re-save)', (() => { const keys = ss.getSheetByName('SET_NEWA').rows.slice(1).map(r => r[0]); return keys.length === new Set(keys).size; })());
+  const trip = plan(TA, { income: 60000, savings: 12000, commitments: [{ name: '=cmd|calc', amount: 1 }] });
+  ok('E7. formula-looking names stay inert (stored inside a JSON string)', trip.ok && String(ss.getSheetByName('SET_NEWA').rows.find(r => r[0] === 'commitments')[1]).startsWith('['));
+  ok('E8. amount strings accepted and normalised', plan(TA, { income: '60000', savings: '12000.505', commitments: [] }).data.plan.savings === 12000.51);
+
+  // isolation
+  const mAfter = call(env, { action: 'all', token: TM, today: TODAY }).data, fAfter = call(env, { action: 'all', token: TF, today: TODAY }).data;
+  ok('I1. Muhammed settings untouched by other profiles saving', mAfter.settings.monthly_income === 45000 && mAfter.settings.commitments === undefined);
+  ok('I2. Friend settings untouched', fAfter.settings.monthly_income === 30000 && fAfter.settings.commitments === undefined);
+  ok('I3. NEWA and NEWB have independent plans', call(env, { action: 'all', token: TA, today: TODAY }).data.plan.savings !== call(env, { action: 'all', token: TB, today: TODAY }).data.plan.savings);
+  const spoof = call(env, { action: 'saveMoneyPlan', token: TB, today: TODAY, user_key: 'MUHAMMED', settings_sheet: 'SET_MUH', set: 'SET_MUH', plan: { income: 1, savings: 0, commitments: [], settings_sheet: 'SET_MUH' } });
+  ok('I4. spoofed sheet/user_key in saveMoneyPlan ignored (lands in own tab only)', spoof.ok && call(env, { action: 'all', token: TM, today: TODAY }).data.settings.monthly_income === 45000);
+  ok('I5. saveMoneyPlan without / with bad token -> unauthorized', plan(undefined, PLAN).error === 'unauthorized' && plan('abc.def', PLAN).error === 'unauthorized');
+  ok('I6. GET saveMoneyPlan not available', JSON.parse(env.doGet({ parameter: { action: 'saveMoneyPlan' } }).getContent()).error === 'unauthorized');
+
+  // guest
+  const gset = JSON.stringify(ss.getSheetByName('SET_GUEST').rows);
+  ok('G1. guest cannot change the shared demo plan', !plan(TG, PLAN).ok && JSON.stringify(ss.getSheetByName('SET_GUEST').rows) === gset);
+  const gp = call(env, { action: 'all', token: TG, today: TODAY }).data.plan;
+  ok('G2. guest keeps its demo plan (income 45,000 / savings 10,000 / fixed 16,500), not editable', gp.income === 45000 && gp.savings === 10000 && gp.fixed === 16500 && gp.editable === false && gp.needs_setup === false);
+  const gr = call(env, { action: 'resetGuest', token: TG, today: TODAY });
+  ok('G3. resetGuest restores demo settings and returns the plan', gr.ok && gr.data.plan.income === 45000 && gr.data.plan.needs_setup === false);
+
+  // existing transactions unaffected by plan changes
+  ok('T1. Muhammed transactions unchanged after all plan saves', ss.getSheetByName('TX_MUH').getLastRow() === 5 && call(env, { action: 'all', token: TM, today: TODAY }).data.transactions.length === 4);
+  const na = call(env, { action: 'addTransaction', token: TA, today: TODAY, transaction: { amount: 100, note: 'A_SPEND', type: 'expense', client_id: 'na1' } });
+  const afterSpend = call(env, { action: 'all', token: TA, today: TODAY }).data.state;
+  ok('T2. add/edit/delete still work on a profile with a saved plan', na.ok && afterSpend.spent_today === 100 &&
+     call(env, { action: 'updateTransaction', token: TA, today: TODAY, transaction: { transaction_id: na.data.transaction.transaction_id, amount: 50 } }).ok &&
+     call(env, { action: 'deleteTransaction', token: TA, today: TODAY, transaction: { transaction_id: na.data.transaction.transaction_id } }).data.state.spent_today === 0);
+  const keep = call(env, { action: 'addTransaction', token: TA, today: TODAY, transaction: { amount: 200, note: 'KEEP', type: 'expense', client_id: 'na2' } });
+  const before = call(env, { action: 'all', token: TA, today: TODAY }).data;
+  const resaved = plan(TA, { income: 90000, savings: 12000, commitments: [{ name: 'Rent', amount: 14000 }] });
+  const afterTx = call(env, { action: 'all', token: TA, today: TODAY }).data.transactions;
+  ok('T3. saving the plan leaves existing transactions byte-identical', JSON.stringify(afterTx) === JSON.stringify(before.transactions) && resaved.data.state.spent_today === 200);
+  ok('T4. plan change recalculates pace (more income -> higher today pace, same spend)', resaved.data.state.today_pace > before.state.today_pace || before.state.today_pace === 0);
+
+  console.log('\n== Money Model V2 - Step 1 (data model only; calculateState unchanged) ==');
+  const J2 = JSON.stringify;
+  const allOf = (tok, today) => call(env, { action: 'all', token: tok, today: today || TODAY });
+  const snapPriv = tok => { const d = allOf(tok).data; return J2({ s: d.settings, st: d.state, tx: d.transactions.map(t => [t.transaction_id, t.date, t.amount, t.note, t.type]) }); };
+  const mBefore = snapPriv(TM), fBefore = snapPriv(TF);
+  const mRowsBefore = J2(ss.getSheetByName('SET_MUH').rows), fRowsBefore = J2(ss.getSheetByName('SET_FRIEND').rows);
+  const BASE = { income: 60000, savings: 12000, commitments: [{ name: 'Rent', amount: 14000 }] };
+  const v2 = (tok, extra, today) => plan(tok, Object.assign({}, BASE, extra), today);
+
+  // fresh isolated profile for V2 writes
+  uw.getRange(8, 1, 1, 6).setValues([['NEWC', H(NEWCODE), 'TX_NEWC', 'SET_NEWC', 'user', true]]);
+  env.CacheService.getScriptCache().remove('USERS_META_V1');
+  ss.insertSheet('TX_NEWC').rows = [['Date', 'Amount', 'Note', 'Type', 'ID']];
+  ss.insertSheet('SET_NEWC').rows = [['key', 'value'], ['starting_balance', 4321], ['starting_balance_date', MONTH1], ['metro_weekday_cost', 135], ['weekly_auto_cost', 60]];
+  const TC = call(env, { action: 'login', code: NEWCODE, profile: 'NEWC' }).data.token;
+
+  // 28. setup state
+  const c0 = allOf(TC).data.plan;
+  ok('V28. unconfigured profile -> setup_state needs_plan (+ legacy needs_setup alias true)', c0.setup_state === 'needs_plan' && c0.needs_setup === true, c0);
+  ok('V28b. V2 fields read as not-established, nothing invented', c0.display_name === '' && c0.currency === null && c0.current_balance === null && c0.current_balance_date === null && c0.minimum_daily_spend === 0);
+  const pl0 = allOf(TM).data.plan, pf0 = allOf(TF).data.plan, pg0 = allOf(TG).data.plan;
+  ok('V13a. Muhammed (valid plan, no balance) -> needs_position, needs_setup false, no invented balance', pl0.setup_state === 'needs_position' && pl0.needs_setup === false && pl0.current_balance === null && pl0.current_balance_date === null);
+  ok('V14a. Friend -> needs_position, needs_setup false', pf0.setup_state === 'needs_position' && pf0.needs_setup === false && pf0.current_balance === null);
+  ok('V15a. Guest -> complete (demo), not editable', pg0.setup_state === 'complete' && pg0.editable === false);
+  ok('V27. all response keeps every previous key (user, settings, plan.*, transactions, state)', (() => { const d = allOf(TM).data; return ['user', 'settings', 'plan', 'transactions', 'state'].every(k => k in d) && ['needs_setup', 'editable', 'income', 'savings', 'fixed', 'commitments', 'available'].every(k => k in d.plan); })());
+
+  // invalid inputs (nothing written)
+  const cSnap = J2(ss.getSheetByName('SET_NEWC').rows);
+  const badV = (n, extra) => ok(n, !v2(TC, extra).ok && J2(ss.getSheetByName('SET_NEWC').rows) === cSnap);
+  badV('V6. negative current_balance rejected', { current_balance: -1 });
+  badV('V6b. non-numeric current_balance rejected', { current_balance: 'lots' });
+  badV('V7. negative minimum_daily_spend rejected', { minimum_daily_spend: -5 });
+  badV('V7b. non-numeric minimum_daily_spend rejected', { minimum_daily_spend: 'abc' });
+  badV('V8a. display_name too long rejected', { display_name: 'x'.repeat(41) });
+  badV('V8b. display_name that looks like a hash rejected', { display_name: 'a'.repeat(64) });
+  badV('V8c. display_name non-text rejected', { display_name: { a: 1 } });
+  badV('V8d. display_name control characters rejected', { display_name: 'bad\u0007name' });
+  badV('V9a. unsupported currency rejected', { currency: 'USD' });
+  badV('V3a. current_balance_date without a balance rejected', { current_balance_date: '2026-01-05' });
+  badV('V3b. invalid calendar date rejected', { current_balance: 10, current_balance_date: '2026-02-30' });
+  badV('V3c. future current_balance_date rejected', { current_balance: 10, current_balance_date: '2999-01-01' });
+  badV('V3d. malformed date rejected', { current_balance: 10, current_balance_date: '05/01/2026' });
+
+  // store / read
+  const w1 = v2(TC, { display_name: '  Asha  ', currency: 'mad', current_balance: '5400.555', current_balance_date: MONTH1, minimum_daily_spend: 150 });
+  ok('V1. display_name stored trimmed', w1.ok && w1.data.plan.display_name === 'Asha' && w1.data.settings.display_name === 'Asha', w1);
+  ok('V2. current_balance stored (2dp)', w1.data.plan.current_balance === 5400.56 && w1.data.settings.current_balance === 5400.56);
+  ok('V3. current_balance_date stored as YYYY-MM-DD text', w1.data.plan.current_balance_date === MONTH1 && String(w1.data.settings.current_balance_date) === MONTH1);
+  ok('V4. minimum_daily_spend stored', w1.data.plan.minimum_daily_spend === 150 && w1.data.settings.minimum_daily_spend === 150);
+  ok('V9b. currency normalised + stored', w1.data.plan.currency === 'MAD');
+  ok('V29. setup_state complete once plan + balance established', w1.data.plan.setup_state === 'complete' && w1.data.plan.needs_setup === false);
+  for (const cu of ['INR', 'MAD', 'IQD', 'RUB']) ok('V9c. currency ' + cu + ' accepted', v2(TC, { currency: cu }).data.plan.currency === cu);
+  const c1 = allOf(TC).data;
+  ok('V1-4r. all() reads the same V2 fields back', c1.plan.display_name === 'Asha' && c1.plan.current_balance === 5400.56 && c1.plan.minimum_daily_spend === 150);
+
+  // absent / zero minimum
+  ok('V5a. minimum_daily_spend zero accepted -> 0 (none configured)', v2(TC, { minimum_daily_spend: 0 }).data.plan.minimum_daily_spend === 0);
+  ok('V5b. minimum_daily_spend null/empty clears to 0', v2(TC, { minimum_daily_spend: 150 }).ok && v2(TC, { minimum_daily_spend: null }).data.plan.minimum_daily_spend === 0 && v2(TC, { minimum_daily_spend: '' }).data.plan.minimum_daily_spend === 0);
+  ok('V5c. profile with no minimum stored reads 0', allOf(TA).data.plan.minimum_daily_spend === 0);
+
+  // silent-rewrite protections
+  const rowsC = J2(ss.getSheetByName('SET_NEWC').rows);
+  allOf(TC); allOf(TC, '2031-03-09'); allOf(TC, '2019-12-31');
+  ok('V22. reads (any client day) never rewrite current_balance_date or any setting', J2(ss.getSheetByName('SET_NEWC').rows) === rowsC);
+  const dateBefore = allOf(TC).data.plan.current_balance_date, balBefore = allOf(TC).data.plan.current_balance;
+  const lg = plan(TC, BASE, '2030-01-01');   // legacy-shaped save (no V2 fields), different local day
+  ok('V26. legacy saveMoneyPlan (no V2 fields) still works', lg.ok && lg.data.plan.income === 60000);
+  ok('V23. ...and does not overwrite current_balance / date / name / currency / minimum', lg.data.plan.current_balance === balBefore && lg.data.plan.current_balance_date === dateBefore && lg.data.plan.display_name === 'Asha' && lg.data.plan.currency !== null);
+  const dflt = v2(TC, { current_balance: 100 }, '2026-01-15');
+  ok('V21. balance saved without a date takes the CLIENT local day (not server time)', dflt.ok && dflt.data.plan.current_balance_date === '2026-01-15', dflt);
+  ok('V23b. an explicit new balance does replace the old one', dflt.data.plan.current_balance === 100);
+  ok('V-dry. dry_run of V2 fields writes nothing', (() => { const r0 = J2(ss.getSheetByName('SET_NEWC').rows); const d = v2(TC, { current_balance: 777, dry_run: true }); return d.ok && d.data.plan.current_balance === 777 && J2(ss.getSheetByName('SET_NEWC').rows) === r0; })());
+
+  // starting_balance legacy + derived current_balance untouched
+  ok('V24. legacy starting_balance / starting_balance_date preserved', (() => { const r = allOf(TC).data.settings; return r.starting_balance === 4321 && String(r.starting_balance_date).slice(0, 10) === MONTH1; })());
+  const stC = allOf(TC).data.state;
+  ok('V24b. derived state.current_balance still = legacy starting_balance formula (V2 balance does NOT reinterpret it)', stC.current_balance === 4321 && stC.inputs.starting_balance === 4321);
+  ok('V24c. Muhammed legacy starting_balance intact', allOf(TM).data.settings.starting_balance === 25000);
+
+  // metro / auto are inert
+  const stBefore = J2(allOf(TC).data.state);
+  const scRows = ss.getSheetByName('SET_NEWC').rows; scRows.forEach(r => { if (r[0] === 'metro_weekday_cost') r[1] = 999; if (r[0] === 'weekly_auto_cost') r[1] = 888; });
+  ok('V25a. changing legacy metro/auto values changes NOTHING in state', J2(allOf(TC).data.state) === stBefore);
+  ok('V25b. plan/V2 model exposes no metro/auto', !J2(allOf(TC).data.plan).match(/metro|auto/i));
+  ok('V25c. no active logic reads them (only comments/legacy seeds mention them)', !/\.metro_weekday_cost|\.weekly_auto_cost|s\.metro|s\.weekly/.test(CODE.replace(/\/\/.*$/gm, '')));
+
+  // existing data untouched
+  ok('V11/12. existing transactions + ids byte-identical (Muhammed)', snapPriv(TM) === mBefore);
+  ok('V13b. Muhammed state/settings/tx unchanged by all V2 work', snapPriv(TM) === mBefore && J2(ss.getSheetByName('SET_MUH').rows) === mRowsBefore);
+  ok('V14b. Friend state/settings/tx unchanged', snapPriv(TF) === fBefore && J2(ss.getSheetByName('SET_FRIEND').rows) === fRowsBefore);
+  const txC = J2(ss.getSheetByName('TX_NEWC').rows);
+  v2(TC, { display_name: 'Asha B' }); ok('V11b. V2 saves never touch a profile\'s transaction tab', J2(ss.getSheetByName('TX_NEWC').rows) === txC);
+  ok('V10. existing commitments remain valid', allOf(TC).data.plan.commitments.length === 1 && allOf(TC).data.plan.commitments[0].name === 'Rent' && allOf(TM).data.plan.commitments[0].amount === 16500);
+
+  // guest + isolation
+  const gRows = J2(ss.getSheetByName('SET_GUEST').rows);
+  ok('V16a. Guest cannot save V2 fields', !plan(TG, Object.assign({}, BASE, { current_balance: 1, display_name: 'x' })).ok && J2(ss.getSheetByName('SET_GUEST').rows) === gRows);
+  ok('V15b. Guest login/session/demo still work', (() => { const g2 = call(env, { action: 'guest' }); return g2.ok && allOf(g2.data.token).data.plan.income === 45000; })());
+  const gr2 = call(env, { action: 'resetGuest', token: TG, today: TODAY });
+  ok('V15c. resetGuest restores demo incl. explicit demo V2 values (Guest, 45000)', gr2.ok && gr2.data.plan.display_name === 'Guest' && gr2.data.plan.current_balance === 45000 && gr2.data.plan.setup_state === 'complete');
+  ok('V15d. Guest demo state (Pace) unchanged by the new demo rows', J2(allOf(TG).data.state.today_pace) === J2(gr2.data.state.today_pace) && gr2.data.state.inputs.starting_balance === 25000);
+  ok('V16b. Guest reset never touches private tabs', snapPriv(TM) === mBefore && snapPriv(TF) === fBefore);
+  const spoofV2 = call(env, { action: 'saveMoneyPlan', token: TC, today: TODAY, user_key: 'MUHAMMED', settings_sheet: 'SET_MUH', plan: Object.assign({}, BASE, { display_name: 'HACK', current_balance: 1, settings_sheet: 'SET_MUH', user_key: 'MUHAMMED' }) });
+  ok('V17. cross-user isolation: spoofed identifiers write only to the caller\'s own tab', spoofV2.ok && J2(ss.getSheetByName('SET_MUH').rows) === mRowsBefore && allOf(TM).data.plan.display_name === '');
+  ok('V17b. Friend cannot read NEWC V2 data', !J2(allOf(TF).data).includes('Asha'));
+
+  // auth / secrets / urls / local day
+  ok('V18. code-only + legacy auth still work', call(env, { action: 'login', code: CODES.MUHAMMED }).data.user === 'MUHAMMED' && call(env, { action: 'login', profile: 'FRIEND', code: CODES.FRIEND }).ok);
+  ok('V19. no code/hash/secret in any V2-era response', ![allOf(TM), allOf(TF), allOf(TG), allOf(TC), w1].some(r => J2(r).match(/access_credential|SESSION_SECRET|[0-9a-f]{64}/)));
+  ok('V19b. USERS/hash never reachable through settings (display_name cannot be a hash)', !v2(TC, { display_name: H(CODES.MUHAMMED) }).ok);
+  ok('V20. no token in URLs: GET cannot read or write anything', ['all', 'saveMoneyPlan', 'settings'].every(a => JSON.parse(env.doGet({ parameter: { action: a, token: TC } }).getContent()).error === 'unauthorized'));
+  ok('V20b. V2 save without / with bad token -> unauthorized', plan(undefined, Object.assign({}, BASE, { current_balance: 1 })).error === 'unauthorized' && plan('x.y', BASE).error === 'unauthorized');
+  ok('V21b. Pace state still driven by the client local day (same data, different day -> different pace)', allOf(TM, '2026-09-10').data.state.month.day_of_month === 10 && allOf(TM, '2026-09-25').data.state.month.day_of_month === 25);
+  ok('V-final. Muhammed + Friend + their Settings tabs still byte-identical at the end', snapPriv(TM) === mBefore && snapPriv(TF) === fBefore && J2(ss.getSheetByName('SET_MUH').rows) === mRowsBefore && J2(ss.getSheetByName('SET_FRIEND').rows) === fRowsBefore);
+
+  console.log('\n== Step 1.5: commitment ids + paid/unpaid (data model only; calculateState unchanged) ==');
+  const mSetRows15 = J2(ss.getSheetByName('SET_MUH').rows), mTx15 = J2(ss.getSheetByName('TX_MUH').rows), fTx15 = J2(ss.getSheetByName('TX_FRIEND').rows);
+  const mSnap15 = snapPriv(TM), fSnap15 = snapPriv(TF);
+  // profile with a LEGACY commitments cell ([{name,amount}] only) as it exists in production today
+  uw.getRange(9, 1, 1, 6).setValues([['NEWD', H(NEWCODE), 'TX_NEWD', 'SET_NEWD', 'user', true]]);
+  env.CacheService.getScriptCache().remove('USERS_META_V1');
+  ss.insertSheet('TX_NEWD').rows = [['Date', 'Amount', 'Note', 'Type', 'ID'], [TODAY, 55, 'D_KEEP', 'expense', 'fixed-id-d1']];
+  ss.insertSheet('SET_NEWD').rows = [['key', 'value'], ['monthly_income', 60000], ['monthly_savings_target', 12000], ['fixed_monthly_expenses', 11000],
+    ['commitments', JSON.stringify([{ name: 'Rent', amount: 10000 }, { name: 'Internet', amount: 1000 }])], ['starting_balance', 100], ['starting_balance_date', MONTH1]];
+  const TD = call(env, { action: 'login', code: NEWCODE, profile: 'NEWD' }).data.token;
+  const dRows0 = J2(ss.getSheetByName('SET_NEWD').rows), dTx0 = J2(ss.getSheetByName('TX_NEWD').rows);
+  const cm = () => allOf(TD).data.plan.commitments;
+  const save15 = (list, today, tok) => plan(tok || TD, { income: 60000, savings: 12000, commitments: list }, today);
+
+  // legacy normalisation (read path never writes)
+  const L1 = cm();
+  ok('C1. legacy {name,amount} normalises to {id,name,amount,status,paid_at}', L1.length === 2 && L1.every(c => c.id && c.name && typeof c.amount === 'number' && c.status === 'unpaid' && c.paid_at === null), L1);
+  ok('C2. legacy commitments get a stable generated id (cm_...)', L1.every(c => /^cm_[a-z0-9]{16}$/.test(c.id)) && L1[0].id !== L1[1].id);
+  const L2 = cm(), L3 = allOf(TD, '2031-01-01').data.plan.commitments;
+  ok('C3. ids stable across repeated reads (any client day)', J2(L1) === J2(L2) && J2(L1) === J2(L3));
+  ok('C3b. reads never write: legacy cell + sheet byte-identical (ids not persisted until a legitimate save)', J2(ss.getSheetByName('SET_NEWD').rows) === dRows0);
+  ok('C-nopaid. legacy commitments are NEVER inferred paid (even though a matching-size transaction pattern could exist)', L1.every(c => c.status === 'unpaid'));
+  ok('C-rem0. remaining_commitments = sum of unpaid (11,000) and fixed total unchanged', allOf(TD).data.plan.remaining_commitments === 11000 && allOf(TD).data.plan.fixed === 11000);
+  const stD0 = allOf(TD).data.state;
+
+  // legacy-shaped save (old frontend): ids persist, name-match keeps identity, nothing else changes
+  const S1 = save15([{ name: 'Rent', amount: 10000 }, { name: 'Internet', amount: 1000 }]);
+  ok('C4a. legacy payload save works and PERSISTS the same ids the reads showed', S1.ok && J2(S1.data.plan.commitments.map(c => c.id)) === J2(L1.map(c => c.id)), S1);
+  ok('C4b. persisted cell now holds ids/status/paid_at', JSON.parse(ss.getSheetByName('SET_NEWD').rows.find(r => r[0] === 'commitments')[1]).every(c => c.id && c.status === 'unpaid' && c.paid_at === null));
+  const rentId = L1[0].id, netId = L1[1].id;
+
+  // edits keep ids
+  const E1 = save15([{ id: rentId, name: 'House Rent', amount: 11000 }, { id: netId, name: 'Internet', amount: 1000 }]);
+  ok('C5a. editing name + amount keeps the id', E1.ok && E1.data.plan.commitments[0].id === rentId && E1.data.plan.commitments[0].name === 'House Rent' && E1.data.plan.commitments[0].amount === 11000, E1);
+  ok('C5b. id not regenerated by later saves/reads', save15([{ id: rentId, name: 'House Rent', amount: 11000 }, { id: netId, name: 'Internet', amount: 1000 }]).data.plan.commitments[0].id === rentId && cm()[0].id === rentId);
+  ok('C5c. fixed = sum of ALL commitments (paid + unpaid): 12,000', allOf(TD).data.plan.fixed === 12000 && allOf(TD).data.settings.fixed_monthly_expenses === 12000);
+
+  // new commitment
+  const N1 = save15([{ id: rentId, name: 'House Rent', amount: 11000 }, { id: netId, name: 'Internet', amount: 1000 }, { name: 'Phone', amount: 500 }]);
+  const phone = N1.data.plan.commitments[2];
+  ok('C6. new commitment gets a fresh id', N1.ok && /^cm_[a-f0-9]{32}$/.test(phone.id) && phone.id !== rentId && phone.id !== netId, N1);
+  ok('C7/8. new commitment defaults to unpaid with paid_at null', phone.status === 'unpaid' && phone.paid_at === null);
+
+  // paid / unpaid transitions
+  const P1 = save15([{ id: rentId, name: 'House Rent', amount: 11000, status: 'paid', paid_at: '2026-09-05' }, { id: netId, name: 'Internet', amount: 1000 }, { id: phone.id, name: 'Phone', amount: 500 }], '2026-09-20');
+  ok('C9/12. unpaid -> paid with an explicit date sets paid_at', P1.ok && P1.data.plan.commitments[0].status === 'paid' && P1.data.plan.commitments[0].paid_at === '2026-09-05', P1);
+  const P2 = save15([{ id: rentId, name: 'House Rent', amount: 11000 }, { id: netId, name: 'Internet', amount: 1000, status: 'paid' }, { id: phone.id, name: 'Phone', amount: 500 }], '2026-02-03');
+  ok('C10. paid without a date defaults to the CLIENT local day (not server time)', P2.data.plan.commitments[1].status === 'paid' && P2.data.plan.commitments[1].paid_at === '2026-02-03', P2);
+  ok('C10b. omitting status keeps an already-paid commitment paid, keeps its original date', P2.data.plan.commitments[0].status === 'paid' && P2.data.plan.commitments[0].paid_at === '2026-09-05');
+  const P3 = save15([{ id: rentId, name: 'House Rent', amount: 11000, status: 'unpaid' }, { id: netId, name: 'Internet', amount: 1000, status: 'paid' }, { id: phone.id, name: 'Phone', amount: 500 }]);
+  ok('C11. paid -> unpaid clears paid_at', P3.ok && P3.data.plan.commitments[0].status === 'unpaid' && P3.data.plan.commitments[0].paid_at === null);
+  ok('C11b. explicit paid_at:null with unpaid is fine', save15([{ id: rentId, name: 'House Rent', amount: 11000, status: 'unpaid', paid_at: null }, { id: netId, name: 'Internet', amount: 1000, status: 'paid' }, { id: phone.id, name: 'Phone', amount: 500 }]).ok);
+
+  // remaining-commitments contract
+  const R1 = allOf(TD).data.plan;
+  ok('C20/21/22. remaining = unpaid only: Rent 11,000 + Phone 500 = 11,500 (Internet paid excluded); fixed still 12,500', R1.remaining_commitments === 11500 && R1.fixed === 12500, R1);
+  const allPaid = save15([{ id: rentId, name: 'House Rent', amount: 11000, status: 'paid' }, { id: netId, name: 'Internet', amount: 1000, status: 'paid' }, { id: phone.id, name: 'Phone', amount: 500, status: 'paid' }]);
+  ok('C22b. all paid -> remaining 0; all unpaid -> full sum', allPaid.data.plan.remaining_commitments === 0 && save15([{ id: rentId, name: 'House Rent', amount: 11000, status: 'unpaid' }, { id: netId, name: 'Internet', amount: 1000, status: 'unpaid' }, { id: phone.id, name: 'Phone', amount: 500, status: 'unpaid' }]).data.plan.remaining_commitments === 12500);
+  const stMarked = allOf(TD).data.state;
+  ok('C-calc. calculateState UNCHANGED by paid/unpaid (Step 2 will consume unpaid): total_spendable/today_pace identical to all-unpaid', stMarked.total_spendable === save15([{ id: rentId, name: 'House Rent', amount: 11000, status: 'paid' }, { id: netId, name: 'Internet', amount: 1000 }, { id: phone.id, name: 'Phone', amount: 500 }]).data.state.total_spendable);
+
+  // rejections (nothing written)
+  const cur = J2(ss.getSheetByName('SET_NEWD').rows), okList = [{ id: rentId, name: 'House Rent', amount: 11000 }];
+  const bad15 = (name, list) => ok(name, !save15(list).ok && J2(ss.getSheetByName('SET_NEWD').rows) === cur);
+  bad15('C13a. invalid status rejected', [{ id: rentId, name: 'House Rent', amount: 11000, status: 'done' }]);
+  bad15('C13b. status is case-exact (PAID rejected)', [{ id: rentId, name: 'House Rent', amount: 11000, status: 'PAID' }]);
+  bad15('C14. contradictory unpaid + paid_at rejected', [{ id: rentId, name: 'House Rent', amount: 11000, status: 'unpaid', paid_at: '2026-09-20' }]);
+  bad15('C14b. omitted status on an UNPAID commitment + paid_at is contradictory', [{ id: netId, name: 'Internet', amount: 1000, paid_at: '2026-09-20' }]);
+  bad15('C14c. invalid paid_at format rejected', [{ id: rentId, name: 'House Rent', amount: 11000, status: 'paid', paid_at: '20/09/2026' }]);
+  bad15('C14d. impossible paid_at date rejected', [{ id: rentId, name: 'House Rent', amount: 11000, status: 'paid', paid_at: '2026-02-30' }]);
+  bad15('C14e. future paid_at rejected', [{ id: rentId, name: 'House Rent', amount: 11000, status: 'paid', paid_at: '2999-01-01' }]);
+  bad15('C15. negative amount rejected', [{ id: rentId, name: 'House Rent', amount: -1 }]);
+  bad15('C16. non-numeric amount rejected', [{ id: rentId, name: 'House Rent', amount: 'lots' }]);
+  bad15('C17. empty name rejected', [{ id: rentId, name: '   ', amount: 5 }]);
+  bad15('C18a. duplicate ids in one payload rejected', [{ id: rentId, name: 'A', amount: 1 }, { id: rentId, name: 'B', amount: 2 }]);
+  bad15('C18b. an unknown / forged id rejected (cannot invent or reuse ids)', [{ id: 'cm_forged123456', name: 'X', amount: 1 }]);
+
+  // delete: gone, id never reused
+  const gone = save15([{ id: netId, name: 'Internet', amount: 1000 }, { id: phone.id, name: 'Phone', amount: 500 }]);
+  ok('C19a. deleted commitment is gone and stays gone across reads', gone.ok && cm().every(c => c.id !== rentId) && J2(allOf(TD, '2031-05-05').data.plan.commitments).indexOf(rentId) < 0);
+  const readd = save15([{ id: netId, name: 'Internet', amount: 1000 }, { id: phone.id, name: 'Phone', amount: 500 }, { name: 'House Rent', amount: 11000 }]);
+  ok('C19b. re-adding the same name gets a NEW id (old id never reused)', readd.ok && readd.data.plan.commitments[2].id !== rentId);
+  ok('C19c. sending the deleted id again is rejected', !save15([{ id: rentId, name: 'House Rent', amount: 11000 }]).ok);
+  ok('C18c. editing one commitment never changes another (ids independent)', (() => { const b = cm(); const n = save15(b.map((c, i) => i === 0 ? Object.assign({}, c, { amount: c.amount + 1 }) : c)); return n.ok && n.data.plan.commitments.slice(1).every((c, i) => J2(c) === J2(b[i + 1])); })());
+
+  // legacy-client compatibility: name match keeps identity/paid state
+  const beforeLegacy = cm();
+  save15(beforeLegacy.map(c => Object.assign({}, c, { status: 'paid' })));
+  const legacyResave = save15(beforeLegacy.map(c => ({ name: c.name, amount: c.amount })));   // what the old frontend sends
+  ok('C-legacy. old-frontend payload (no ids) keeps ids AND paid state (no silent unpaid/paid flip)', legacyResave.ok && legacyResave.data.plan.commitments.every((c, i) => c.id === beforeLegacy[i].id && c.status === 'paid'), legacyResave);
+
+  // transactions untouched, other users untouched
+  ok('C23/24. transactions + ids in every profile byte-identical (TX_NEWD, TX_MUH, TX_FRIEND)', J2(ss.getSheetByName('TX_NEWD').rows) === dTx0 && J2(ss.getSheetByName('TX_MUH').rows) === mTx15 && J2(ss.getSheetByName('TX_FRIEND').rows) === fTx15);
+  ok('C23b. no transaction was auto-linked/inferred (D_KEEP untouched, no commitment references it)', ss.getSheetByName('TX_NEWD').rows[1][2] === 'D_KEEP' && !J2(ss.getSheetByName('SET_NEWD').rows).includes('transaction_id'));
+  ok('C25. Muhammed/Friend stored Settings + state unchanged (only the READ shape gained ids)', J2(ss.getSheetByName('SET_MUH').rows) === mSetRows15 && snapPriv(TM) === mSnap15 && snapPriv(TF) === fSnap15);
+  const mIds = allOf(TM).data.plan.commitments.map(c => c.id);
+  ok('C25b. Muhammed legacy commitment id is deterministic across calls, logins and days', J2(mIds) === J2(allOf(TM, '2030-06-06').data.plan.commitments.map(c => c.id)) && J2(mIds) === J2(allOf(call(env, { action: 'login', code: CODES.MUHAMMED }).data.token).data.plan.commitments.map(c => c.id)));
+  ok('C25c. ids are profile-scoped (no collision between users with the same commitment)', allOf(TF).data.plan.commitments[0].id !== allOf(TM).data.plan.commitments[0].id);
+
+  // isolation / auth
+  const dBeforeIso = J2(ss.getSheetByName('SET_NEWD').rows);
+  ok('C26/30. Friend cannot mutate another profile\'s commitment by id (unknown id) and Friend data unchanged', !plan(TF, { income: 30000, savings: 5000, commitments: [{ id: cm()[0].id, name: 'HACK', amount: 1, status: 'paid' }] }).ok && J2(ss.getSheetByName('SET_NEWD').rows) === dBeforeIso && snapPriv(TF) === fSnap15);
+  ok('C30b. Muhammed token + NEWD ids / spoofed sheet names -> rejected, both tabs untouched', !call(env, { action: 'saveMoneyPlan', token: TM, today: TODAY, settings_sheet: 'SET_NEWD', user_key: 'NEWD', plan: { income: 45000, savings: 10000, commitments: [{ id: cm()[0].id, name: 'HACK', amount: 1, status: 'paid' }] } }).ok && J2(ss.getSheetByName('SET_NEWD').rows) === dBeforeIso && J2(ss.getSheetByName('SET_MUH').rows) === mSetRows15);
+  ok('C29. unauthorized commitment mutation rejected (no token / bad token / expired)', plan(undefined, { income: 1, savings: 0, commitments: [{ name: 'x', amount: 1 }] }).error === 'unauthorized' && plan('a.b', BASE).error === 'unauthorized' && plan(env.issueToken_('NEWD', -60), BASE).error === 'unauthorized');
+  ok('C32. no GET can read or mutate commitments', ['saveMoneyPlan', 'all', 'setCommitmentStatus'].every(a => JSON.parse(env.doGet({ parameter: { action: a, token: TD, commitment_id: rentId, status: 'paid' } }).getContent()).error === 'unauthorized') && J2(ss.getSheetByName('SET_NEWD').rows) === dBeforeIso);
+  ok('C33. no code/hash/secret in commitment responses', !J2([allOf(TD), allOf(TM), P1, readd]).match(/access_credential|SESSION_SECRET|[0-9a-f]{64}/) && !J2(allOf(TD)).includes(NEWCODE));
+
+  // guest
+  const gc1 = allOf(TG).data.plan.commitments.map(c => c.id), gRows15 = J2(ss.getSheetByName('SET_GUEST').rows);
+  ok('C27a. Guest still works and cannot mutate commitments', !plan(TG, { income: 45000, savings: 10000, commitments: [{ id: gc1[0], name: 'x', amount: 1, status: 'paid' }] }).ok && J2(ss.getSheetByName('SET_GUEST').rows) === gRows15);
+  const gr15a = call(env, { action: 'resetGuest', token: TG, today: TODAY }), gr15b = call(env, { action: 'resetGuest', token: TG, today: TODAY });
+  ok('C28. Guest reset restores a deterministic commitment state (same ids, unpaid, both resets)', gr15a.ok && J2(gr15a.data.plan.commitments) === J2(gr15b.data.plan.commitments) && gr15a.data.plan.commitments.map(c => c.id).join() === gc1.join() && gr15a.data.plan.commitments.every(c => c.status === 'unpaid'));
+  ok('C31. local-day semantics preserved (day from client only)', allOf(TM, '2026-09-10').data.state.month.day_of_month === 10 && P2.data.plan.commitments[1].paid_at === '2026-02-03');
+  ok('C-final. Muhammed + Friend byte-identical at the end of Step 1.5 tests', snapPriv(TM) === mSnap15 && snapPriv(TF) === fSnap15 && J2(ss.getSheetByName('SET_MUH').rows) === mSetRows15);
+
+  console.log('\n== Step 2: position-based Pace engine (V2) ==');
+  const near = (a, b, tol) => typeof a === 'number' && Math.abs(a - b) <= (tol || 0.006);
+  const eng = o => env.calculatePaceV2_(Object.assign({ today: '2026-09-20', planValid: true, position: { balance: 20000, date: '2026-09-20' }, savingsTarget: 4000,
+    commitments: [{ amount: 10000, status: 'unpaid' }], minimumDailySpend: 0, transactions: [] }, o));
+  const ex = (date, amount, type) => ({ date, amount, type: type || 'expense' });
+
+  const A = eng({});
+  ok('A. basic: flexible 6000, today_pace 545.45 over 11 days (Sep 20-30), protected 14000', A.ready && A.remaining_flexible === 6000 && near(A.today_pace, 545.4545) && A.days_remaining_incl_today === 11 && A.protected_money === 14000 && A.effective_balance === 20000, A);
+  const Bc = eng({ transactions: [ex('2026-09-20', 200)] });
+  ok('B. spend less: tomorrow 5800/10 = 580; today_pace stays start-of-day 545.45', Bc.remaining_flexible === 5800 && Bc.days_remaining_after_today === 10 && Bc.tomorrow_pace === 580 && near(Bc.today_pace, 545.4545) && Bc.effective_balance === 19800, Bc);
+  const Cc = eng({ transactions: [ex('2026-09-20', 800)] });
+  ok('C. overspend: tomorrow 5200/10 = 520 (lower than 580)', Cc.remaining_flexible === 5200 && Cc.tomorrow_pace === 520 && Cc.tomorrow_pace < Bc.tomorrow_pace);
+  const Dd = eng({ commitments: [{ amount: 10000, status: 'paid' }, { amount: 1000, status: 'unpaid' }] });
+  ok('D. paid commitment not protected: remaining_commitments 1000; protected 5000; flexible 15000', Dd.remaining_commitments === 1000 && Dd.protected_money === 5000 && Dd.remaining_flexible === 15000);
+  ok('E. expense the day BEFORE the balance date has NO effect', eng({ transactions: [ex('2026-09-19', 500)] }).effective_balance === 20000);
+  ok('F. expense ON the balance date DOES reduce it', eng({ transactions: [ex('2026-09-20', 500)] }).effective_balance === 19500);
+  const Gg = eng({ position: { balance: 10000, date: '2026-09-20' }, commitments: [{ amount: 8000, status: 'unpaid' }] });
+  ok('G. behind: flexible -2000, status behind, shown pace 0 but raw negative exposed (not "just 0/day")', Gg.remaining_flexible === -2000 && Gg.pace_status === 'behind' && Gg.today_pace === 0 && Gg.today_pace_unclamped < 0 && near(Gg.today_pace_unclamped, -181.82));
+  const Hh = eng({ today: '2026-09-21', position: { balance: 17000, date: '2026-09-20' }, minimumDailySpend: 400 });
+  ok('H. minimum: pace 300 < 400 -> below_minimum, gap 100, gap_total 100 x 10 days = 1000; pace NOT changed by the minimum', Hh.today_pace === 300 && Hh.minimum_spend_gap === 100 && Hh.minimum_spend_gap_total === 1000 && Hh.pace_status === 'below_minimum' && Hh.days_remaining_incl_today === 10 && eng({ today: '2026-09-21', position: { balance: 17000, date: '2026-09-20' }, minimumDailySpend: 0 }).today_pace === 300);
+  ok('I. minimum disabled (0 / null / absent / negative garbage) never gives below_minimum', [0, null, undefined, -5, 'x'].every(m => eng({ today: '2026-09-21', position: { balance: 17000, date: '2026-09-20' }, minimumDailySpend: m }).pace_status === 'on_pace'));
+  ok('J. missing position -> needs_position, ready false, NO pace fields', (() => { const r = eng({ position: null }); return r.ready === false && r.pace_status === 'needs_position' && r.today_pace === undefined && r.reason === 'needs_position'; })());
+  ok('J2. plan invalid -> no pace (needs_plan); corrupted balance/date -> needs_position, no crash', eng({ planValid: false }).reason === 'needs_plan' && [{ balance: 'abc', date: '2026-09-20' }, { balance: -5, date: '2026-09-20' }, { balance: 100, date: 'garbage' }, { balance: 100, date: '2026-02-30' }, { balance: 100, date: '' }, { balance: 100 }, {}].every(pz => { const r = eng({ position: pz }); return r.ready === false && r.pace_status === 'needs_position'; }));
+  ok('J3. balance date in the future of "today" -> not ready (never calculates with a corrupted anchor)', eng({ position: { balance: 100, date: '2026-09-25' } }).ready === false);
+  const Kk = eng({ today: '2026-10-01', position: { balance: 20000, date: '2026-09-20' }, transactions: [ex('2026-09-25', 300)] });
+  ok('K. no monthly reset: balance carries into October (19700 effective), D = 31 days of October', Kk.effective_balance === 19700 && Kk.days_remaining_incl_today === 31 && Kk.current_balance === 20000 && Kk.period_end === '2026-10-31');
+  ok('L. no automatic income: engine has no income input; income transactions never add to the balance', eng({ transactions: [ex('2026-09-20', 5000, 'income')] }).effective_balance === 20000);
+  ok('Q. zero flexible: pace 0, on_pace with no minimum, below_minimum with a minimum', (() => { const z = eng({ position: { balance: 14000, date: '2026-09-20' } }); const zm = eng({ position: { balance: 14000, date: '2026-09-20' }, minimumDailySpend: 50 }); return z.remaining_flexible === 0 && z.today_pace === 0 && z.pace_status === 'on_pace' && zm.pace_status === 'below_minimum'; })());
+  ok('R. pace exactly equal to the minimum -> on_pace', eng({ position: { balance: 18400, date: '2026-09-20' }, minimumDailySpend: 400 }).today_pace === 400 && eng({ position: { balance: 18400, date: '2026-09-20' }, minimumDailySpend: 400 }).pace_status === 'on_pace');
+  ok('O. many transactions before the anchor: zero effect', eng({ transactions: [ex('2026-09-01', 900), ex('2026-08-15', 900), ex('2026-09-19', 900), ex('2025-01-01', 900)] }).effective_balance === 20000);
+  ok('P. several eligible transactions since the anchor are all summed (before-today + today; future ignored; income ignored)', (() => { const r = eng({ position: { balance: 20000, date: '2026-09-18' }, transactions: [ex('2026-09-18', 100), ex('2026-09-19', 200), ex('2026-09-20', 300), ex('2026-09-25', 999), ex('2026-09-19', 777, 'income')] }); return r.expenses_since_balance === 600 && r.expenses_before_today === 300 && r.expenses_today === 300 && r.effective_balance === 19400 && r.effective_balance_start_of_day === 19700; })());
+  ok('S. local calendar days only: last day D=1, day after month end = new month; bad date strings rejected; no UTC', eng({ today: '2026-09-30' }).days_remaining_incl_today === 1 && eng({ today: '2026-09-30' }).tomorrow_pace === null && eng({ today: '2026-02-28', position: { balance: 20000, date: '2026-02-01' } }).days_remaining_incl_today === 1 && eng({ today: '2028-02-28', position: { balance: 20000, date: '2028-02-01' } }).days_remaining_incl_today === 2 && eng({ today: '2026-13-01' }).ready === false && eng({ today: 'yesterday' }).ready === false);
+  ok('T. determinism: identical inputs -> identical outputs (deep equal), repeatedly', JSON.stringify(eng({ transactions: [ex('2026-09-20', 123.45)] })) === JSON.stringify(eng({ transactions: [ex('2026-09-20', 123.45)] })) && JSON.stringify(A) === JSON.stringify(eng({})));
+  ok('N/M. savings protected exactly once; fixed_monthly_expenses is not an engine input (no double count)', A.protected_money === 4000 + 10000 && !/fixed_monthly_expenses|starting_balance|monthly_income|metro|auto/i.test(JSON.stringify(A)) && /calculatePaceV2_\(input\)/.test(CODE) && !/fixed_monthly_expenses|starting_balance|monthly_income|minimum_daily_spend\s*[-+]/.test(CODE.slice(CODE.indexOf('function calculatePaceV2_'), CODE.indexOf('function applyPaceV2_'))));
+  ok('purity: engine has no Sheets/Cache/Lock/Properties/Utilities/fetch calls', !/SpreadsheetApp|CacheService|LockService|PropertiesService|Utilities\.|UrlFetch|setValue|appendRow/.test(CODE.slice(CODE.indexOf('function calculatePaceV2_'), CODE.indexOf('function applyPaceV2_'))));
+
+  // ---- invariants ----
+  const deepSnap = o => JSON.stringify(o);
+  const inp = { today: '2026-09-20', planValid: true, position: { balance: 20000, date: '2026-09-18' }, savingsTarget: 4000, commitments: [{ id: 'cm_a', name: 'Rent', amount: 10000, status: 'unpaid', paid_at: null }, { id: 'cm_b', name: 'Net', amount: 1000, status: 'paid', paid_at: '2026-09-02' }], minimumDailySpend: 250, transactions: [ex('2026-09-18', 100), ex('2026-09-20', 50)] };
+  const snapIn = deepSnap(inp); const outA = env.calculatePaceV2_(inp), outB = env.calculatePaceV2_(inp);
+  ok('INV9-12. calculation never mutates balance / transactions / commitments / plan inputs; same inputs -> same output', deepSnap(inp) === snapIn && deepSnap(outA) === deepSnap(outB) && inp.position.balance === 20000 && inp.transactions.length === 2 && inp.commitments[1].status === 'paid');
+  ok('INV8. minimum_daily_spend never changes the mathematical pace (any value)', [0, 1, 250, 5000].every(m => eng({ minimumDailySpend: m }).today_pace === A.today_pace && eng({ minimumDailySpend: m }).tomorrow_pace === A.tomorrow_pace));
+  ok('INV2/3. spending below pace raises tomorrow, above pace lowers it (relative to exactly-on-pace)', (() => { const on = eng({ transactions: [ex('2026-09-20', A.today_pace)] }).tomorrow_pace; return eng({ transactions: [ex('2026-09-20', 100)] }).tomorrow_pace > on && eng({ transactions: [ex('2026-09-20', 900)] }).tomorrow_pace < on; })());
+  ok('INV1. staying exactly on pace every day (Sep 20-30) preserves the savings target (flexible ~ 0, balance = savings + unpaid commitments)', (() => { const tx = []; let last; for (let d = 20; d <= 30; d++) { const day = '2026-09-' + d; const r = eng({ today: day, transactions: tx.slice() }); tx.push(ex(day, r.today_pace)); last = eng({ today: day, transactions: tx.slice() }); } return Math.abs(last.remaining_flexible) < 0.2 && last.effective_balance >= 14000 - 0.2; })());
+  ok('INV4-7. history has no effect; paid unprotected; unpaid protected; savings once', eng({ transactions: [ex('2026-09-10', 5000)] }).remaining_flexible === A.remaining_flexible && Dd.protected_money < A.protected_money && eng({ commitments: [{ amount: 10000, status: 'unpaid' }, { amount: 500, status: 'unpaid' }] }).protected_money === 14500 && eng({ savingsTarget: 0 }).protected_money === 10000);
+
+  // ---- through the API (calculateState -> state) ----
+  uw.getRange(10, 1, 1, 6).setValues([['NEWE', H(NEWCODE), 'TX_NEWE', 'SET_NEWE', 'user', true]]);
+  env.CacheService.getScriptCache().remove('USERS_META_V1');
+  ss.insertSheet('TX_NEWE').rows = [['Date', 'Amount', 'Note', 'Type', 'ID'], ['2026-09-19', 1234, 'OLD_BEFORE_ANCHOR', 'expense', 'e-old-1'], ['2026-08-30', 777, 'OLDER', 'expense', 'e-old-2']];
+  ss.insertSheet('SET_NEWE').rows = [['key', 'value'], ['starting_balance', 999999], ['starting_balance_date', '2026-09-01'], ['metro_weekday_cost', 135], ['weekly_auto_cost', 60]];
+  const TE = call(env, { action: 'login', code: NEWCODE, profile: 'NEWE' }).data.token;
+  const E0 = plan(TE, { income: 999999, savings: 4000, commitments: [{ name: 'Rent', amount: 10000 }], current_balance: 20000, current_balance_date: '2026-09-20' }, '2026-09-20');
+  ok('API-A. saved plan + position -> state.v2 engine result on the API (flexible 6000, pace 545.45)', E0.ok && E0.data.state.pace_engine === 'v2' && E0.data.state.position_ready === true && E0.data.state.v2.remaining_flexible === 6000 && near(E0.data.state.today_pace, 545.4545) && E0.data.state.pace_status === 'on_pace', E0.data && E0.data.state);
+  ok('API-M. fixed_monthly_expenses (10000, legacy) + income (999999) + starting_balance (999999) are NOT used: protected = 4000 + 10000 only', E0.data.settings.fixed_monthly_expenses === 10000 && E0.data.state.v2.protected_money === 14000 && E0.data.state.v2.effective_balance === 20000);
+  const setRowsE = J2(ss.getSheetByName('SET_NEWE').rows), txRowsE = J2(ss.getSheetByName('TX_NEWE').rows);
+  const stE = allOf(TE, '2026-09-20').data.state;
+  ok('API-O. pre-anchor transactions (Sep 19 / Aug 30) are ignored', stE.v2.effective_balance === 20000 && stE.v2.expenses_since_balance === 0);
+  const addE = call(env, { action: 'addTransaction', token: TE, today: '2026-09-20', transaction: { amount: 200, note: 'FOOD', type: 'expense', client_id: 'e1', date: '2026-09-20' } });
+  ok('API-B. add 200 today: legacy spent_today 200, remaining_spendable = remaining_flexible 5800, remaining_pace = tomorrow 580, today_pace unchanged', addE.ok && addE.data.state.spent_today === 200 && addE.data.state.remaining_spendable === 5800 && addE.data.state.remaining_pace === 580 && near(addE.data.state.today_pace, 545.4545));
+  const afterAdd = allOf(TE, '2026-09-20').data;
+  ok('API-3. current_balance is an ANCHOR: still 20000 with the same date after a transaction was added (only effective_balance moved)', afterAdd.plan.current_balance === 20000 && afterAdd.plan.current_balance_date === '2026-09-20' && afterAdd.state.v2.current_balance === 20000 && afterAdd.state.v2.effective_balance === 19800);
+  const setAfterAdd = J2(ss.getSheetByName('SET_NEWE').rows);
+  allOf(TE, '2026-09-21'); allOf(TE, '2026-10-01'); allOf(TE, '2026-09-20');
+  ok('API-N. reads/calculation on any day never write settings (balance, date, commitments untouched)', J2(ss.getSheetByName('SET_NEWE').rows) === setAfterAdd);
+  const oct = allOf(TE, '2026-10-01').data;
+  ok('API-K. new month: no reset, no income added: effective balance 19800, October days', oct.state.v2.effective_balance === 19800 && oct.state.v2.days_remaining_incl_today === 31 && oct.plan.current_balance === 20000);
+  const delE = call(env, { action: 'deleteTransaction', token: TE, today: '2026-09-20', transaction: { transaction_id: addE.data.transaction.transaction_id } });
+  ok('API-3b. deleting it restores effective_balance; anchor still untouched', delE.ok && delE.data.state.v2.effective_balance === 20000 && allOf(TE).data.plan.current_balance === 20000);
+  ok('API-tx. calculation never mutates transaction rows (pre-anchor rows byte-identical)', J2(ss.getSheetByName('TX_NEWE').rows.slice(0, 3)) === J2(JSON.parse(txRowsE).slice(0, 3)));
+  const paidE = plan(TE, { income: 999999, savings: 4000, commitments: [{ id: E0.data.plan.commitments[0].id, name: 'Rent', amount: 10000, status: 'paid' }, { name: 'Phone', amount: 500 }] }, '2026-09-20');
+  ok('API-D. marking Rent paid + adding Phone: protected = 4000 + 500 -> flexible 15500 (fixed_monthly_expenses is 10500 but not subtracted)', paidE.ok && paidE.data.state.v2.remaining_commitments === 500 && paidE.data.state.v2.remaining_flexible === 15500 && paidE.data.settings.fixed_monthly_expenses === 10500);
+  ok('API-min. minimum_daily_spend saved: gap exposed, today_pace unchanged', (() => { const r = plan(TE, { income: 999999, savings: 4000, commitments: [{ id: E0.data.plan.commitments[0].id, name: 'Rent', amount: 10000, status: 'paid' }, { name: 'Phone', amount: 500 }], minimum_daily_spend: 2000 }, '2026-09-20'); return r.ok && r.data.state.v2.minimum_spend_gap > 0 && r.data.state.pace_status === 'below_minimum' && near(r.data.state.today_pace, 15500 / 11); })());
+
+  // needs_position: legacy starting_balance / income / transactions are never used as a fallback
+  const stD = allOf(TD).data.state;
+  ok('API-J. plan valid, no current_balance (starting_balance 100 present) -> needs_position, NO pace, no fallback', stD.pace_status === 'needs_position' && stD.position_ready === false && stD.today_pace === 0 && stD.remaining_spendable === 0 && stD.v2.reason === 'needs_position' && allOf(TD).data.plan.setup_state === 'needs_position');
+  ok('API-J2. Muhammed + Friend (real profiles, no position yet) -> needs_position, no fake Pace', [TM, TF].every(t => { const st = allOf(t).data.state; return st.pace_status === 'needs_position' && st.today_pace === 0 && st.status === 'on_track'; }));
+  uw.getRange(11, 1, 1, 6).setValues([['NEWF', H(NEWCODE), 'TX_NEWF', 'SET_NEWF', 'user', true]]);
+  env.CacheService.getScriptCache().remove('USERS_META_V1');
+  ss.insertSheet('TX_NEWF').rows = [['Date', 'Amount', 'Note', 'Type', 'ID']];
+  ss.insertSheet('SET_NEWF').rows = [['key', 'value'], ['monthly_income', 50000], ['monthly_savings_target', 5000], ['fixed_monthly_expenses', 0], ['current_balance', 1000], ['current_balance_date', 'not-a-date']];
+  const TF2 = call(env, { action: 'login', code: NEWCODE, profile: 'NEWF' }).data.token;
+  const stF = allOf(TF2).data;
+  ok('API-J3. corrupted persisted balance date: no crash, needs_position, data NOT repaired by the engine', stF.state.pace_status === 'needs_position' && stF.plan.setup_state === 'needs_position' && ss.getSheetByName('SET_NEWF').rows[5][1] === 'not-a-date');
+
+  // guest
+  const gAll = allOf(TG).data;
+  ok('G-1. Guest demo has a position and a real Pace (ready, on_pace/under), still not editable', gAll.state.position_ready === true && gAll.state.today_pace > 0 && gAll.plan.editable === false && gAll.plan.setup_state === 'complete');
+  const gSheet = ss.getSheetByName('SET_GUEST'); gSheet.rows = gSheet.rows.filter(r => !['display_name', 'current_balance', 'current_balance_date'].includes(r[0]));   // prod-like guest tab (no V2 rows yet)
+  const gHeal = allOf(TG).data;
+  ok('G-2. an old Guest tab without V2 rows self-heals with the explicit demo position (demo only, idempotent)', gHeal.state.position_ready === true && gHeal.plan.current_balance === 45000 && J2(allOf(TG).data.plan) === J2(gHeal.plan));
+  ok('G-3. Guest reset restores the same demo Pace every time', (() => { const a = call(env, { action: 'resetGuest', token: TG, today: TODAY }).data.state.v2, b = call(env, { action: 'resetGuest', token: TG, today: TODAY }).data.state.v2; return a.today_pace === b.today_pace && a.ready; })());
+  ok('G-4. private users cannot touch Guest / Guest cannot touch private position data', !plan(TG, { income: 1, savings: 0, commitments: [], current_balance: 1 }).ok && snapPriv(TM) === mSnap15);
+  ok('S2-auth. auth/isolation/no-secrets still intact with the V2 engine', call(env, { action: 'login', code: CODES.MUHAMMED }).data.user === 'MUHAMMED' && !J2([allOf(TE), allOf(TG), E0]).match(/access_credential|SESSION_SECRET|[0-9a-f]{64}/) && allOf(TF).data.user.key === 'FRIEND' && !J2(allOf(TF).data).includes('FOOD'));
+  ok('S2-final. legacy state fields keep their shape (frontend compatible): every prior key still present', ['as_of', 'inputs', 'month', 'discretionary_monthly', 'total_spendable', 'initial_daily_pace', 'daily_allowance', 'today_pace', 'spent_today', 'expected_today', 'today_variance', 'remaining_spendable', 'remaining_pace', 'remaining_discretionary', 'safe_daily_for_rest_of_month', 'expected_spend_to_date', 'actual_spend_to_date', 'income_this_month', 'pace', 'status', 'current_balance', 'transaction_count'].every(k => k in allOf(TM).data.state) && allOf(TM).data.state.month.days_remaining_incl_today >= 1);
+
+  console.log('\n== Legacy tabs untouched at the end ==');
+  ok('legacy Transactions/Settings byte-identical to start', legacyBefore === JSON.stringify(ss.getSheetByName('Transactions').rows) + JSON.stringify(ss.getSheetByName('Settings').rows));
+
+  console.log('\n' + pass + ' passed, ' + fail + ' failed');
+  process.exit(fail ? 1 : 0);
+}
+main();

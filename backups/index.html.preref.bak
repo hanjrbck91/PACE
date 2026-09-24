@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="light" />
+  <meta name="theme-color" content="#f2ecdd" />
+  <title>Pace</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="page gate" id="gate" hidden>
+    <div class="welcome" id="gateWelcome">
+      <svg class="trajectory" viewBox="0 0 340 170" preserveAspectRatio="xMinYMid meet" aria-hidden="true" focusable="false">
+        <g class="traj__strokes" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+          <path class="traj__ink traj__ink--soft" pathLength="1" stroke-width="1" d="M7.9 74.7 C11.1 73.5 20.9 69.5 27.6 67.8 C34.2 66.0 41.1 63.7 47.5 64.2 C54.0 64.7 60.2 67.0 66.5 70.7 C72.8 74.5 79.4 81.6 85.4 86.8 C91.4 91.9 96.5 97.8 102.6 101.7 C108.6 105.6 115.4 109.6 121.8 110.2 C128.2 110.8 134.6 107.2 140.9 105.2 C147.3 103.1 154.2 99.9 159.7 98.0 C165.2 96.1 168.8 94.9 173.8 93.8 C178.9 92.7 184.3 93.1 190.1 91.5 C195.8 89.9 202.4 87.5 208.4 84.4 C214.4 81.2 219.5 75.6 226.1 72.6 C232.7 69.5 241.4 67.6 247.8 65.9 C254.1 64.2 258.6 62.0 264.2 62.3 C269.7 62.6 275.6 65.4 281.1 67.7 C286.7 70.0 292.2 74.9 297.5 76.1 C302.8 77.3 308.2 76.3 313.0 74.9 C317.8 73.6 324.1 69.0 326.3 67.8"/>
+          <path class="traj__ink" pathLength="1" stroke-width="2.6" d="M5.9 72.2 C9.4 71.1 19.9 67.2 26.7 65.9 C33.6 64.6 40.6 63.4 47.0 64.2 C53.5 65.1 59.3 67.3 65.5 71.0 C71.7 74.8 78.4 81.9 84.2 86.8 C90.0 91.7 94.5 96.8 100.3 100.4 C106.2 104.1 112.5 108.3 119.3 108.9 C126.1 109.4 134.7 105.5 141.3 103.7 C147.9 102.0 153.7 100.1 158.8 98.3 C163.9 96.5 166.8 94.3 172.0 93.0 C177.2 91.7 184.5 92.0 190.3 90.3 C196.0 88.6 200.5 85.9 206.4 82.6 C212.4 79.4 219.5 74.0 226.0 70.8 C232.6 67.5 239.3 64.8 245.5 63.3 C251.7 61.8 257.3 61.0 263.2 61.9 C269.1 62.8 275.4 66.5 280.9 69.0 C286.4 71.4 290.8 75.5 296.0 76.4 C301.2 77.3 307.0 76.3 312.0 74.5 C317.0 72.6 323.6 66.9 325.9 65.4"/>
+        </g>
+        <g class="traj__today">
+          <circle cx="172.0" cy="93.0" r="9" fill="none" stroke="var(--red)" stroke-width="1" opacity="0.35"/>
+          <circle cx="172.0" cy="93.0" r="4.4" fill="var(--red)"/>
+          <text x="172.0" y="120.0" text-anchor="middle">today</text>
+        </g>
+      </svg>
+      <h1 class="gate__brand">PACE</h1>
+      <p class="welcome__tag">Know your money.<br>Stay on pace.</p>
+      <p class="welcome__lede">See what you can spend today<br>while staying on track with<br>what you want to save.</p>
+      <p class="gate__err" id="welcomeNote" role="status" hidden></p>
+      <div class="gate__choices">
+        <button class="gate__btn gate__btn--primary" type="button" id="gateSignIn">SIGN IN</button>
+        <button class="gate__btn gate__btn--guest" type="button" id="gateGuest">EXPLORE AS GUEST</button>
+      </div>
+      <button class="welcome__info" type="button" data-sheet="about" aria-label="About Pace" title="About Pace">&#9432;</button>
+    </div>
+
+    <form class="gate__form" id="gateForm" hidden autocomplete="off">
+      <h2 class="signin__title">SIGN IN</h2>
+      <label class="label" for="gateCode">Enter your access code</label>
+      <input class="gate__code" id="gateCode" name="pace-access-code" type="password"
+             autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" />
+      <p class="gate__err" id="gateErr" role="alert" hidden></p>
+      <div class="gate__actions">
+        <button class="gate__go" type="submit" id="gateGo">CONTINUE</button>
+        <button class="gate__back" type="button" id="gateBack">Back</button>
+      </div>
+    </form>
+  </main>
+
+  <main class="page" id="app" data-state="boot" hidden>
+    <header class="masthead">
+      <span class="brand">Pace<span class="tag" id="profileTag" hidden></span></span>
+      <nav class="nav" aria-label="Details">
+        <button class="nav__link" type="button" data-sheet="month">Month</button>
+        <button class="nav__link" type="button" data-sheet="balance">Balance</button>
+        <button class="nav__link" type="button" data-sheet="log">Today</button>
+        <button class="nav__link nav__gear" type="button" data-sheet="config" aria-label="Settings" title="Settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+      </nav>
+    </header>
+
+    <p class="dateline" id="ctx">&nbsp;</p>
+
+    <section class="hero" aria-live="polite">
+      <div class="hero__top">
+        <h1 class="status" id="status">&nbsp;</h1>
+        <span class="stamp" id="stamp" hidden aria-hidden="true">You spent<br>a lot today.</span>
+      </div>
+      <p class="diff"><mark class="hl" id="diff">&nbsp;</mark></p>
+    </section>
+
+    <section class="pace">
+      <span class="label">Today&rsquo;s pace</span>
+      <p class="pace__big"><span id="todayPace">&mdash;</span><span class="pace__per">/ day</span></p>
+      <div class="bar" id="bar" aria-hidden="true">
+        <div class="bar__fill" id="barFill"></div>
+        <div class="bar__mark"></div>
+      </div>
+      <div class="pace__row">
+        <span class="pace__spent" id="spentLine">&mdash;</span>
+        <span class="pace__left" id="leftLine">&mdash;</span>
+      </div>
+    </section>
+
+    <section class="meta">
+      <div class="meta__row">
+        <span class="k">From tomorrow</span>
+        <span class="meta__v"><span class="delta" id="tomDelta"></span><span class="v" id="tom">&mdash;</span></span>
+      </div>
+      <div class="meta__row">
+        <span class="k">Remaining spendable</span>
+        <span class="v" id="remain">&mdash;</span>
+      </div>
+      <div class="meta__row">
+        <span class="k">Days remaining</span>
+        <span class="v" id="days">&mdash;</span>
+      </div>
+    </section>
+
+    <section class="today">
+      <div class="today__head">
+        <span class="label">Today&rsquo;s expenses</span>
+        <button class="seeall" type="button" data-sheet="log">See all &rarr;</button>
+      </div>
+      <ul class="entries" id="entries"></ul>
+    </section>
+
+    <p class="err" id="err" role="alert" hidden></p>
+
+    <button class="log" id="add" type="button">
+      <span class="log__plus" aria-hidden="true">+</span> Log an expense
+    </button>
+  </main>
+
+  <main class="page plan" id="plan" hidden aria-live="polite"></main>
+
+  <div class="sheet" id="sheet" hidden>
+    <div class="sheet__scrim" data-close></div>
+    <div class="sheet__card" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+      <div class="sheet__head">
+        <h2 id="sheetTitle">&nbsp;</h2>
+        <button class="sheet__x" type="button" data-close aria-label="Close">close</button>
+      </div>
+      <div id="sheetContent"></div>
+    </div>
+  </div>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

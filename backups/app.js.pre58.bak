@@ -1,0 +1,1864 @@
+/* Pace — frontend logic. Vanilla JS, no framework, no build, no web fonts.
+ *
+ * The Apps Script backend owns every financial number (Money Model V2: state.v2).
+ * This file reads the state, paints the ledger page, and logs expenses. It
+ * NEVER recomputes finances - the main screen only formats state.v2; the one
+ * local mirror is the optimistic display shift after a logged expense.
+ *
+ * Network: one GET (?action=all) on open; one POST per expense whose response
+ * already carries { transaction, state } — applied directly, no follow-up GET.
+ */
+
+(function () {
+  "use strict";
+
+  var API = (window.PACE_API_URL || "").trim();
+
+  // ---- session (Multi-User V1: access codes + guest) --------------------
+  // The backend issues a signed session token after a valid access code (or a
+  // guest entry). We keep ONLY that token + the profile name; the access code
+  // is never stored. `session.user` is used purely to namespace local data and
+  // label the UI - the backend re-derives identity from the token on every call,
+  // so editing it in the browser grants nothing.
+  //
+  // Persistent login: one slot PER PROFILE (`pace_session_<USER>`) plus a pointer
+  // to the active profile (`pace_active_profile`). A slot holds only
+  // { token, user, mode } - never an access code, hash, or backend secret.
+  // The signed token carries its own expiry (30d private / 24h guest, set by the
+  // backend, never extended here); the client reads it only to skip a pointless
+  // network call - the backend stays the authority on every request.
+  var SESSION_PREFIX = "pace_session_";
+  var ACTIVE_KEY = "pace_active_profile";
+  var LEGACY_SESSION_KEY = "pace_session_v1";   // pre-per-profile single slot (migrated once)
+  var NOTICE_KEY = "pace_notice";               // sessionStorage: one-shot message for the gate
+  var session = null;                       // { token, user, mode } of the ACTIVE profile
+  var PROFILE_LABEL = { MUHAMMED: "Personal", FRIEND: "Friend", GUEST: "Guest (demo)" };   // Settings row only; the entry screen is profile-agnostic
+  var EXPIRED_MSG = "Session expired. Please sign in again.";
+  function validUserKey(u) { return typeof u === "string" && /^[A-Z0-9_]{1,20}$/.test(u); }
+  function sessionKey(u) { return SESSION_PREFIX + u; }
+  function tokenExp(tok) {               // unix seconds from the token payload, or 0
+    try {
+      var b = String(tok).split(".")[0].replace(/-/g, "+").replace(/_/g, "/");
+      while (b.length % 4) b += "=";
+      return (JSON.parse(atob(b)).e | 0) || 0;
+    } catch (e) { return 0; }
+  }
+  function sessionExpired(s) { var e = tokenExp(s && s.token); return !e || e <= Math.floor(Date.now() / 1000); }
+  function loadSession(u) {
+    if (!validUserKey(u)) return null;
+    try {
+      var s = JSON.parse(localStorage.getItem(sessionKey(u)));
+      if (s && typeof s.token === "string" && s.user === u) return { token: s.token, user: s.user, mode: s.mode };
+    } catch (e) {}
+    return null;
+  }
+  function saveSession(s) {              // also makes it the active profile
+    try {
+      localStorage.setItem(sessionKey(s.user), JSON.stringify({ token: s.token, user: s.user, mode: s.mode }));
+      localStorage.setItem(ACTIVE_KEY, s.user);
+    } catch (e) {}
+  }
+  function clearSession(u) { if (validUserKey(u)) { try { localStorage.removeItem(sessionKey(u)); } catch (e) {} } }
+  function getActive() { try { var u = localStorage.getItem(ACTIVE_KEY); return validUserKey(u) ? u : null; } catch (e) { return null; } }
+  function setActive(u) { try { localStorage.setItem(ACTIVE_KEY, u); } catch (e) {} }
+  function clearActive() { try { localStorage.removeItem(ACTIVE_KEY); } catch (e) {} }
+  function setNotice(m) { try { sessionStorage.setItem(NOTICE_KEY, m); } catch (e) {} }
+  function takeNotice() { try { var m = sessionStorage.getItem(NOTICE_KEY); sessionStorage.removeItem(NOTICE_KEY); return m; } catch (e) { return null; } }
+  function migrateLegacySession() {      // keep existing signed-in users signed in
+    try {
+      var raw = localStorage.getItem(LEGACY_SESSION_KEY);
+      if (raw === null) return;
+      var s = JSON.parse(raw);
+      if (s && typeof s.token === "string" && validUserKey(s.user) && !localStorage.getItem(sessionKey(s.user))) saveSession(s);
+      localStorage.removeItem(LEGACY_SESSION_KEY);
+    } catch (e) { try { localStorage.removeItem(LEGACY_SESSION_KEY); } catch (e2) {} }
+  }
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  // ---- currency (Multi-Currency V1) ------------------------------------
+  // Display-only metadata: Pace NEVER converts money. Changing currency just
+  // re-labels the same numeric values. The choice lives in localStorage
+  // (instant, no network write), seeded from settings.currency, default INR.
+  var CURRENCIES = {
+    INR: { code: "INR", name: "Indian Rupee",   symbol: "₹",    locale: "en-IN", before: true,  space: false },
+    MAD: { code: "MAD", name: "Moroccan Dirham", symbol: "د.م.", locale: "en",    before: true,  space: true  }, // 'en' comma grouping (ar-MA uses '.' thousands → reads like a decimal)
+    IQD: { code: "IQD", name: "Iraqi Dinar",     symbol: "ع.د",  locale: "ar-IQ", before: true,  space: true  },
+    RUB: { code: "RUB", name: "Russian Ruble",   symbol: "₽",    locale: "ru-RU", before: false, space: true  }
+  };
+  function currencyKey() { return "pace_currency_" + (session ? session.user : "NONE"); }
+
+  function currentCurrency() {
+    try { var c = localStorage.getItem(currencyKey()); if (c && CURRENCIES[c]) return c; } catch (e) {}
+    var s = store.settings && store.settings.currency;
+    if (s && CURRENCIES[String(s).toUpperCase()]) return String(s).toUpperCase();
+    return "INR";
+  }
+  function setCurrency(code) {
+    if (!CURRENCIES[code]) return;
+    try { localStorage.setItem(currencyKey(), code); } catch (e) {}
+  }
+
+  // Central money formatter. Locale-aware grouping via Intl (Latin digits), with
+  // the requested symbol placed per currency. Underlying numbers never change.
+  function formatMoney(amount, code) {
+    var cur = CURRENCIES[code] || CURRENCIES.INR;
+    var v = Math.round(Number(amount) || 0);
+    var neg = v < 0; v = Math.abs(v);
+    var num;
+    try {
+      num = new Intl.NumberFormat(cur.locale, { maximumFractionDigits: 0, numberingSystem: "latn" }).format(v);
+    } catch (e) {
+      try { num = v.toLocaleString("en-US"); } catch (e2) { num = String(v); }
+    }
+    var body = cur.before
+      ? cur.symbol + (cur.space ? " " : "") + num
+      : num + (cur.space ? " " : "") + cur.symbol;
+    return (neg ? "-" : "") + body;
+  }
+
+  function money(n) { return formatMoney(n, currentCurrency()); }
+
+  // ---- local day (Local Time / Day Boundary V1) ------------------------
+  // The user's Pace "today" is their DEVICE local calendar day. getFullYear/
+  // getMonth/getDate are local (not UTC), so this never shifts across the UTC
+  // boundary the way new Date().toISOString().slice(0,10) would. One source.
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+  function localDayKey(d) {
+    d = d || new Date();
+    return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate());
+  }
+  function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
+  function prefersReduced() {
+    return window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  var store = { state: null, settings: null, tx: [], plan: null };
+
+  // ---- local state cache (stale-while-revalidate) ----------------------
+  // Paint the last server-authoritative state instantly on open, then a
+  // background GET replaces it. Cache is a convenience mirror only; the
+  // server remains the sole source of truth (this NEVER recomputes finances).
+  // Cache is namespaced per profile: one profile can never hydrate another's numbers.
+  function cacheKey() { return "pace_cache_v1_" + (session ? session.user : "NONE"); }
+  var CACHE_VERSION = 1;
+
+  function saveCache() {
+    if (!store.state) return;
+    try {
+      localStorage.setItem(cacheKey(), JSON.stringify({
+        v: CACHE_VERSION,
+        ts: Date.now(),
+        state: store.state,
+        tx: store.tx || [],
+        settings: store.settings || {},
+        plan: store.plan || null
+      }));
+    } catch (e) { /* private mode / quota — caching is best-effort */ }
+  }
+
+  // Returns a valid { state, tx, settings, ts } or null. Fails safe on
+  // malformed JSON, missing fields, or an old cache version.
+  function loadCache() {
+    var raw;
+    try { raw = localStorage.getItem(cacheKey()); }
+    catch (e) { return null; }
+    if (!raw) return null;
+    var c;
+    try { c = JSON.parse(raw); }
+    catch (e) { return null; }
+    if (!c || c.v !== CACHE_VERSION) return null;
+    var s = c.state;
+    // minimal shape check — the fields render() actually reads
+    if (!s || typeof s !== "object") return null;
+    if (typeof s.today_pace !== "number" || typeof s.remaining_pace !== "number") return null;
+    if (!s.month || typeof s.month !== "object") return null;
+    if (!Array.isArray(c.tx)) return null;
+    if (!c.settings || typeof c.settings !== "object") return null;
+    return { state: s, tx: c.tx, settings: c.settings, plan: (c.plan && typeof c.plan === "object") ? c.plan : null, ts: c.ts };
+  }
+
+  function clearCache() {
+    try { localStorage.removeItem(cacheKey()); } catch (e) {}
+  }
+
+  // subtle, non-blocking "sync unavailable" note (injected, no design change)
+  var syncNote = null;
+  function showSyncNote() {
+    if (!syncNote) {
+      syncNote = document.createElement("p");
+      syncNote.id = "syncNote";
+      syncNote.setAttribute("role", "status");
+      syncNote.style.cssText =
+        "font-family:var(--mono);font-size:11px;color:var(--dim);" +
+        "font-style:italic;padding:6px 0 0;margin:0;";
+      var ctx = document.getElementById("ctx");
+      if (ctx && ctx.parentNode) ctx.parentNode.insertBefore(syncNote, ctx.nextSibling);
+    }
+    syncNote.textContent = "Sync unavailable — showing last saved.";
+    syncNote.hidden = false;
+  }
+  function clearSyncNote() { if (syncNote) syncNote.hidden = true; }
+
+  // ---- optimistic logging (Phase 1B) -----------------------------------
+  // On submit we show the expense + its consequence instantly, then the POST
+  // reconciles against the authoritative server state. We do NOT invent a new
+  // pace algorithm: today_pace is left untouched (beginning-of-day semantics),
+  // and the incremental effect of one expense is applied to the aggregates
+  // exactly as the backend's documented output relations define them. The
+  // server response always overwrites this optimistic guess.
+  var submitting = false;   // re-entry / double-tap guard
+  var tmpSeq = 0;
+  function newTempId() { return "tmp_" + Date.now() + "_" + (++tmpSeq); }
+
+  // Optimistic state shift for a signed amount on TODAY. Add passes +amount /
+  // countDelta +1 (unchanged). Corrections reuse it: delete/undo -amount / -1,
+  // edit +(new-old) / 0. today_pace never moves (start-of-day semantics); all
+  // corrections in this app act on today's transactions.
+  function computeOptimistic(prev, amount, countDelta) {
+    if (countDelta === undefined) countDelta = 1;
+    var s = Object.assign({}, prev);        // shallow clone; nested month/inputs untouched
+    var pace = Number(prev.today_pace) || 0;
+    s.spent_today          = (Number(prev.spent_today) || 0) + amount;
+    s.actual_spend_to_date = (Number(prev.actual_spend_to_date) || 0) + amount;
+    s.today_variance       = s.spent_today - pace;              // today_pace unchanged
+    s.remaining_spendable  = (Number(prev.remaining_spendable) || 0) - amount;
+    s.current_balance      = (Number(prev.current_balance) || 0) - amount;
+    s.pace                 = (Number(prev.pace) || 0) + amount; // month view only
+    var daysAfter = (prev.month && Number(prev.month.days_remaining)) || 0;
+    s.remaining_pace       = daysAfter > 0 ? Math.max(s.remaining_spendable, 0) / daysAfter : 0;
+    s.remaining_discretionary       = s.remaining_spendable;    // keep aliases consistent
+    s.safe_daily_for_rest_of_month  = s.remaining_pace;
+    s.transaction_count = (Number(prev.transaction_count) || 0) + countDelta;
+    // Money Model V2: shift ONLY the display fields by the signed amount (today's pace is start-of-day and never
+    // moves; the backend recomputes everything and the response replaces this mirror).
+    if (prev.v2 && prev.v2.ready) {
+      var v = Object.assign({}, prev.v2), r2 = function (n) { return Math.round(n * 100) / 100; };
+      v.expenses_today = r2((Number(v.expenses_today) || 0) + amount);
+      if (v.expenses_counted_today != null) v.expenses_counted_today = r2((Number(v.expenses_counted_today) || 0) + amount);
+      v.expenses_since_balance = r2((Number(v.expenses_since_balance) || 0) + amount);
+      v.effective_balance = r2((Number(v.effective_balance) || 0) - amount);
+      v.remaining_flexible = r2((Number(v.remaining_flexible) || 0) - amount);
+      var da = Number(v.days_remaining_after_today) || 0;
+      v.tomorrow_pace = da > 0 ? r2(Math.max(v.remaining_flexible, 0) / da) : null;
+      if (v.anchor_day) v.today_pace = r2(Math.max(v.remaining_flexible, 0) / (Number(v.pace_days) || 1));   // snapshot day: pace = flexible / days from tomorrow
+      if (v.remaining_flexible < 0) v.pace_status = "behind";
+      s.v2 = v; s.pace_status = v.pace_status;
+      s.remaining_spendable = v.remaining_flexible; s.remaining_pace = v.tomorrow_pace === null ? 0 : v.tomorrow_pace;
+    }
+    return s;
+  }
+
+  // non-blocking rollback notice on the main page (reuses existing tokens)
+  var logNote = null;
+  function showLogError(msg) {
+    if (!logNote) {
+      logNote = document.createElement("p");
+      logNote.id = "logNote";
+      logNote.setAttribute("role", "alert");
+      logNote.style.cssText =
+        "font-family:var(--mono);font-size:12px;color:var(--red);padding:6px 0 0;margin:0;";
+      var ctx = document.getElementById("ctx");
+      if (ctx && ctx.parentNode) ctx.parentNode.insertBefore(logNote, ctx.nextSibling);
+    }
+    logNote.textContent = msg;
+    logNote.hidden = false;
+    clearTimeout(logNote._t);
+    logNote._t = setTimeout(function () { logNote.hidden = true; }, 6000);
+  }
+
+  // ---- large-expense confirmation (Expense Safety 1) -------------------
+  // A sanity check, NOT a limit: warn before an unusually large amount so a
+  // typo (₹25,434 for ₹2,543) is caught, but always let the user continue.
+  // Thresholds are constants (tune later after real use), never user settings.
+  var LARGE_EXPENSE_PACE_MULTIPLIER = 5;     // > 5× today's pace
+  var LARGE_EXPENSE_REMAINING_RATIO = 0.25;  // > 25% of remaining spendable
+
+  function isLargeExpense(val) {
+    var s = store.state;
+    if (!s || !(val > 0)) return false;
+    var pace = Number(s.today_pace) || 0;
+    var rem = Number(s.remaining_spendable) || 0;
+    if (pace > 0 && val > LARGE_EXPENSE_PACE_MULTIPLIER * pace) return true;
+    // only use the remaining-ratio rule when there is a positive pool left
+    if (rem > 0 && val > LARGE_EXPENSE_REMAINING_RATIO * rem) return true;
+    return false;
+  }
+
+  // Shows the paper-styled confirmation inside the existing sheet. It NEVER
+  // submits by itself — only its "Log expense" calls back into the real flow.
+  function showLargeConfirm(val, amount, note, btn, msg, form) {
+    if (form) form.hidden = true;
+    var old = document.getElementById("largeConfirm");
+    if (old) old.parentNode.removeChild(old);
+
+    var box = el("div", "confirm");
+    box.id = "largeConfirm";
+    box.setAttribute("role", "group");
+    box.setAttribute("aria-label", "Large expense confirmation");
+
+    box.appendChild(el("p", "confirm__kicker", "Large expense"));
+    var pace = Number(store.state.today_pace) || 0;
+    box.appendChild(el("p", "confirm__amount", money(val)));
+    box.appendChild(el("p", "confirm__body",
+      money(val) + " is much larger than your pace of " + money(pace) +
+      " / day. This will noticeably change your spending trajectory."));
+    box.appendChild(el("p", "confirm__ask", "Log it anyway?"));
+
+    var actions = el("div", "confirm__actions");
+    var cancel = el("button", "confirm__cancel", "Cancel");
+    cancel.type = "button";
+    var go = el("button", "confirm__go", "Log expense");
+    go.type = "button";
+    actions.appendChild(cancel);
+    actions.appendChild(go);
+    box.appendChild(actions);
+    sheetContent.appendChild(box);
+
+    function close() { if (box.parentNode) box.parentNode.removeChild(box); }
+
+    cancel.addEventListener("click", function () {
+      close();
+      if (form) form.hidden = false;      // amount stays in the field for editing
+      if (amount) amount.focus();
+    });
+    go.addEventListener("click", function () {
+      go.disabled = true;                 // block a double-tap on confirm itself
+      close();
+      submitExpense(amount, note, btn, msg, form, true); // proceed, confirmed
+    });
+
+    // focus Cancel by default so a stray Enter/tap can't confirm accidentally
+    cancel.focus();
+  }
+
+  // ---- transaction corrections: Undo / Edit / Delete (Expense Safety 2) -
+  // Destructive ops are NOT optimistic — correctness over perceived speed. Each
+  // waits for the authoritative backend result, then reconciles + caches. Backend
+  // is addressed by transaction_id and delete is idempotent (already-absent = ok),
+  // so a timeout-retry never double-deletes. opInFlight blocks a second op on the
+  // same id (double-tap / edit-while-pending).
+  var UNDO_WINDOW_MS = 8000;   // Undo affordance lifetime after a successful log
+  var opInFlight = {};         // transaction_id -> true while a mutation is pending
+
+  // Optimistic delete/undo: remove the row + shift Pace immediately, POST in the
+  // background, reconcile to authoritative state on success, surgically restore
+  // the exact row + reverse the Pace delta on failure. Rollback is scoped to THIS
+  // transaction (re-insert its object, reverse its amount) so a concurrent op on a
+  // different id is never clobbered. opInFlight blocks a second op on the same id.
+  function performDelete(id, opts) {
+    opts = opts || {};
+    id = String(id || ""); if (!id) return;
+    if (opInFlight[id]) return;               // guard: one op per transaction
+    var idx = -1, txObj = null;
+    for (var i = 0; i < store.tx.length; i++) {
+      if (store.tx[i].transaction_id === id) { idx = i; txObj = store.tx[i]; break; }
+    }
+    if (idx < 0) return;                       // already gone locally — nothing to do
+    opInFlight[id] = true;
+    var amount = Number(txObj.amount) || 0;
+
+    // 1. optimistic: remove + recompute now
+    store.tx.splice(idx, 1);
+    store.state = computeOptimistic(store.state, -amount, -1);
+    render({ keepDelta: true });
+
+    // 2. background mutation (idempotent by id; client_id keeps the retry safe)
+    apiPost({ action: "deleteTransaction", transaction: { transaction_id: id }, client_id: newClientId(), today: localDayKey() })
+      .then(function (data) {
+        if (data.state) store.state = data.state;   // authoritative wins
+        saveCache();
+        render({ keepDelta: true });
+      })
+      .catch(function () {
+        // 3. surgical rollback: re-insert the exact row, reverse the Pace delta
+        store.tx.splice(Math.min(idx, store.tx.length), 0, txObj);
+        store.state = computeOptimistic(store.state, +amount, +1);
+        render({ keepDelta: true });
+        showLogError("Couldn’t delete — restored.");
+      })
+      .then(function () { delete opInFlight[id]; });
+  }
+
+  // Optimistic edit: apply the new amount/note + shift Pace by (new-old) now,
+  // POST in the background, reconcile on success, restore the exact prior
+  // amount/note + reverse the delta on failure. Same transaction_id throughout.
+  function performUpdate(id, amount, note, opts) {
+    opts = opts || {};
+    id = String(id || ""); if (!id) return;
+    if (opInFlight[id]) return;
+    var txObj = null;
+    for (var i = 0; i < store.tx.length; i++) {
+      if (store.tx[i].transaction_id === id) { txObj = store.tx[i]; break; }
+    }
+    if (!txObj) return;
+    opInFlight[id] = true;
+    var oldAmount = Number(txObj.amount) || 0, oldNote = txObj.note || "";
+    var delta = amount - oldAmount;
+
+    // 1. optimistic: edit in place + recompute now
+    txObj.amount = amount; txObj.note = note;
+    store.state = computeOptimistic(store.state, delta, 0);
+    render({ keepDelta: true });
+
+    // 2. background mutation
+    apiPost({ action: "updateTransaction", transaction: { transaction_id: id, amount: amount, note: note }, client_id: newClientId(), today: localDayKey() })
+      .then(function (data) {
+        var t = data.transaction;
+        if (t) { txObj.amount = t.amount; txObj.note = t.note; }   // authoritative fields
+        if (data.state) store.state = data.state;
+        saveCache();
+        render({ keepDelta: true });
+      })
+      .catch(function () {
+        // 3. surgical rollback: restore exact prior values, reverse the delta
+        txObj.amount = oldAmount; txObj.note = oldNote;
+        store.state = computeOptimistic(store.state, -delta, 0);
+        render({ keepDelta: true });
+        showLogError("Couldn’t save the edit — restored.");
+      })
+      .then(function () { delete opInFlight[id]; });
+  }
+
+  // Undo bar — applies to the MOST RECENT confirmed transaction only (MVP: single,
+  // not a stack). Logging again replaces the target with the newer one.
+  // The bar is shown from the OPTIMISTIC transaction (no backend id needed). The
+  // target is {tempId, id, amount, cancelled}: `id` is null until the POST
+  // confirms and is then promoted to the authoritative transaction_id.
+  var undoBar = null, undoTimer = null, undoTarget = null;
+  function showUndoBar(target) {
+    undoTarget = target;
+    var amount = target.amount;
+    if (!undoBar) {
+      undoBar = document.createElement("div");
+      undoBar.id = "undoBar";
+      undoBar.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0 0;";
+      var txt = document.createElement("span");
+      txt.id = "undoBarText";
+      txt.style.cssText = "font-family:var(--mono);font-size:12px;color:var(--dim);";
+      var btn = document.createElement("button");
+      btn.id = "undoBarBtn"; btn.type = "button"; btn.textContent = "Undo";
+      btn.setAttribute("aria-label", "Undo last logged expense");
+      btn.style.cssText = "min-height:44px;padding:6px 16px;border:1.5px solid var(--ink);background:transparent;color:var(--ink);font-family:var(--serif);font-style:italic;font-size:15px;cursor:pointer;";
+      undoBar.appendChild(txt); undoBar.appendChild(btn);
+      var ctx = document.getElementById("ctx");
+      if (ctx && ctx.parentNode) ctx.parentNode.insertBefore(undoBar, ctx.nextSibling);
+      btn.addEventListener("click", onUndoClick);
+    }
+    document.getElementById("undoBarText").textContent = money(amount) + " logged";
+    var b = document.getElementById("undoBarBtn"); b.disabled = false; b.textContent = "Undo";
+    undoBar.hidden = false;
+    clearTimeout(undoTimer);
+    undoTimer = setTimeout(hideUndoBar, UNDO_WINDOW_MS);
+  }
+  function hideUndoBar() { if (undoBar) undoBar.hidden = true; undoTarget = null; }
+  function onUndoClick() {
+    var t = undoTarget; if (!t) return;
+    clearTimeout(undoTimer);
+    hideUndoBar();                    // close the bar immediately (optimistic)
+    if (t.id) {
+      performDelete(t.id);            // confirmed: optimistic remove + background delete
+    } else {
+      // Not confirmed yet: undo locally NOW (drop the temp row, reverse the
+      // Pace delta). The in-flight add sees `cancelled` when it resolves and
+      // deletes the row the server just wrote (see submitExpense).
+      var had = false;
+      store.tx = store.tx.filter(function (x) { if (x.__tempId === t.tempId) { had = true; return false; } return true; });
+      if (had) {
+        store.state = computeOptimistic(store.state, -t.amount, -1);
+        render({ keepDelta: true });
+      }
+      t.cancelled = true;
+    }
+  }
+
+  // Today's-entries sheet with per-row Edit / Delete (in-place, ledger-styled).
+  function renderLogSheet() {
+    sheetContent.innerHTML = "";
+    var today = todaysExpenses().slice().reverse(); // newest first
+    if (!today.length) { sheetContent.appendChild(el("p", "txempty", "Nothing logged today.")); return; }
+    var sum = today.reduce(function (a, t) { return a + (Number(t.amount) || 0); }, 0);
+    sheetContent.appendChild(el("p", "note-line",
+      today.length + (today.length === 1 ? " entry" : " entries") + "  ·  " + money(sum) + " today"));
+    var ul = el("ul", "txlist");
+    today.forEach(function (t) {
+      var li = el("li", "txrow");
+      li.appendChild(el("span", "a", money(t.amount)));
+      li.appendChild(el("span", "n", t.note || "—"));
+      var actions = el("span", "txactions");
+      var edit = el("button", "txbtn", "Edit"); edit.type = "button";
+      var del = el("button", "txbtn txbtn--del", "Delete"); del.type = "button";
+      if (!t.transaction_id) { edit.disabled = true; del.disabled = true; } // pending optimistic row
+      edit.addEventListener("click", function () { openEditRow(li, t); });
+      del.addEventListener("click", function () { openDeleteRow(li, t); });
+      actions.appendChild(edit); actions.appendChild(del);
+      li.appendChild(actions);
+      ul.appendChild(li);
+    });
+    sheetContent.appendChild(ul);
+  }
+
+  function openEditRow(li, t) {
+    li.innerHTML = "";
+    var form = el("form", "txedit");
+    var amt = el("input"); amt.type = "number"; amt.inputMode = "decimal"; amt.step = "0.01"; amt.min = "0";
+    amt.value = String(t.amount); amt.className = "txedit__amt"; amt.setAttribute("aria-label", "Amount");
+    var note = el("input"); note.type = "text"; note.maxLength = 80; note.value = t.note || "";
+    note.className = "txedit__note"; note.setAttribute("aria-label", "Note");
+    var save = el("button", "txbtn", "Save"); save.type = "submit";
+    var cancel = el("button", "txbtn", "Cancel"); cancel.type = "button";
+    var msg = el("p", "form-msg"); msg.hidden = true;
+    form.appendChild(amt); form.appendChild(note); form.appendChild(save); form.appendChild(cancel); form.appendChild(msg);
+    li.appendChild(form);
+    amt.focus();
+    cancel.addEventListener("click", function () { renderLogSheet(); });
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var v = parseFloat(amt.value);
+      if (!isFinite(v) || v <= 0) { flash(msg, "Enter an amount above zero.", "err"); amt.focus(); return; }
+      // optimistic: render() rebuilds the sheet immediately (form closes); the
+      // background update reconciles or rolls back on its own.
+      performUpdate(t.transaction_id, v, note.value.trim());
+    });
+  }
+
+  function openDeleteRow(li, t) {
+    li.innerHTML = "";
+    var box = el("div", "txconfirm");
+    box.appendChild(el("span", "txconfirm__q", "Delete this expense?"));
+    var cancel = el("button", "txbtn", "Cancel"); cancel.type = "button";
+    var del = el("button", "txbtn txbtn--del", "Delete"); del.type = "button";
+    box.appendChild(cancel); box.appendChild(del);
+    li.appendChild(box);
+    cancel.focus();
+    cancel.addEventListener("click", function () { renderLogSheet(); });
+    del.addEventListener("click", function () {
+      // optimistic: render() rebuilds the sheet immediately (row + confirm gone);
+      // the background delete reconciles or restores the row on failure.
+      performDelete(t.transaction_id);
+    });
+  }
+
+  // ---- networking (Phase 1C: timeout + conservative retry) -------------
+  // Apps Script is normally slow (3–6s) and has been seen to hang ~136s, so
+  // every request is bounded by a ~15s AbortController timeout. A transient
+  // failure (timeout / network / non-JSON reply) is retried ONCE; a server
+  // business error (ok:false, e.g. validation) is NEVER retried. The POST
+  // carries a client_id so its single retry is duplicate-safe: the backend
+  // dedups the id within a 90s window and still returns a fresh state.
+  var REQ_TIMEOUT_MS = 15000;
+
+  function fetchWithTimeout(url, opts, ms) {
+    opts = opts || {};
+    if (typeof AbortController === "undefined") return fetch(url, opts); // no-timeout fallback
+    var ac = new AbortController();
+    opts.signal = ac.signal;
+    var to = setTimeout(function () { ac.abort(); }, ms);
+    return fetch(url, opts).then(
+      function (v) { clearTimeout(to); return v; },
+      function (e) {
+        clearTimeout(to);
+        if (ac.signal.aborted) { var te = new Error("Request timed out"); te.timeout = true; throw te; }
+        throw e;
+      }
+    );
+  }
+  // A failure is transient (retryable) unless it is a server business error.
+  function isTransient(err) { return !(err && err.business); }
+
+  function apiGetOnce(action) {
+    // Reads are POSTs so the session token never appears in a URL. The user's
+    // local day is sent so the server computes "today" in their timezone.
+    return apiPostOnce({ action: action, today: localDayKey() });
+  }
+  function apiGet(action) {
+    // GET is idempotent → safe to retry once on a transient failure.
+    return apiGetOnce(action).catch(function (err) {
+      if (isTransient(err)) return apiGetOnce(action);
+      throw err;
+    });
+  }
+
+  function apiPostOnce(payload) {
+    if (session && session.token) payload = Object.assign({}, payload, { token: session.token });
+    return fetchWithTimeout(API, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" }, // no CORS preflight
+      body: JSON.stringify(payload)
+    }, REQ_TIMEOUT_MS).then(readJson);
+  }
+  var dataEpoch = 0;     // bumped by every real write (not dry-run previews): a load that started before it is stale
+  function apiPost(payload) {
+    var writes = payload && payload.action !== "all" && !(payload.plan && payload.plan.dry_run);
+    if (writes) {
+      dataEpoch++;
+      return apiPost1(payload).then(function (d) { dataEpoch++; return d; }, function (e) { dataEpoch++; throw e; });
+    }
+    return apiPost1(payload);
+  }
+  function apiPost1(payload) {
+    // Retry a POST ONCE only when it carries a client_id (backend idempotency
+    // makes the retry duplicate-safe) AND the failure is transient. Without an
+    // id we never auto-retry a write. Business errors are never retried.
+    var hasId = !!(payload && (payload.client_id || (payload.transaction && payload.transaction.client_id)));
+    return apiPostOnce(payload).catch(function (err) {
+      if (hasId && isTransient(err)) return apiPostOnce(payload);
+      throw err;
+    });
+  }
+
+  function readJson(res) {
+    return res.text().then(function (txt) {
+      var body;
+      try { body = JSON.parse(txt); }
+      catch (e) { throw new Error("Unexpected reply from the server."); } // transient (retryable)
+      if (!body || body.ok !== true) {
+        var be = new Error(humanError(body && body.error));
+        be.business = true;   // server-returned failure → do NOT retry
+        if (body && body.error === "unauthorized" && session) onAuthLost();
+        throw be;
+      }
+      return body.data;
+    });
+  }
+  function humanError(raw) {
+    var s = String(raw || "");
+    if (/amount must be/i.test(s)) return "Enter a valid amount.";
+    if (/not found/i.test(s)) return "The sheet is not set up yet.";
+    if (/busy/i.test(s)) return "Server busy — try again.";
+    return s || "Something went wrong on the server.";
+  }
+  function niceNetwork(err) {
+    var m = (err && err.message) || "";
+    if ((err && err.timeout) || /timed out|timeout|abort/i.test(m)) {
+      return "Server timed out. Check your connection.";
+    }
+    if (/Failed to fetch|NetworkError|load failed/i.test(m)) {
+      return "Can't reach Pace. Check your connection.";
+    }
+    return m || "Something went wrong.";
+  }
+
+  var newClientId = function () {
+    return "c_" + Date.now() + "_" + Math.random().toString(36).slice(2, 10);
+  };
+
+  // ---- helpers ---------------------------------------------------------
+
+  function todaysExpenses() {
+    // "today" = the user's LOCAL day (matches the day new expenses are stamped
+    // with and the day the server now computes state for).
+    var d = localDayKey();
+    return store.tx.filter(function (t) { return t.date === d && t.type === "expense"; });
+  }
+
+  // ---- render ----------------------------------------------------------
+
+  var prevRemaining = null; // for the "from tomorrow" change flash
+  var deltaTimer = null;
+
+  // Main screen = pure presentation of the backend's Money Model V2 result (state.v2). No financial formula lives
+  // here: every number below is read from state.v2 and only formatted. (state.status / remaining_spendable /
+  // remaining_pace / state.current_balance are legacy aliases and are NOT used for the V2 presentation.)
+  function greetingText() {
+    var name = store.plan && store.plan.display_name;
+    if (!name || (session && session.mode === "guest")) return "";
+    var h = new Date().getHours();
+    return (h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening") + ", " + name + ".";
+  }
+
+  // Pace slider = PRESENTATION ONLY (aria-hidden; the same facts are printed beside it). The notch at 60% is
+  // "today's line". Fill = what counted against today's pace (server field expenses_counted_today) relative to
+  // today_pace, reaching the line at 100%. It only passes the line when the server says BEHIND: then the fill runs
+  // to the end (the deficit itself is printed as text). No Pace maths lives here.
+  function sliderFill(v) {
+    if (!v || !v.ready) return 0;
+    if (v.pace_status === "behind") return 1;
+    if (v.pace_status === "below_minimum" && Number(v.minimum_daily_spend) > 0) return clamp((Number(v.today_pace) || 0) / Number(v.minimum_daily_spend), 0, 1) * 0.60;   // hatched: today's pace as a share of the minimum
+    var spent = Number(v.expenses_counted_today != null ? v.expenses_counted_today : v.expenses_today) || 0;
+    var pace = Number(v.today_pace) || 0;
+    if (!(pace > 0)) return 0;
+    return clamp(spent / pace, 0, 1) * 0.60;
+  }
+
+  function render(opts) {
+    var s = store.state;
+    if (!s) return;
+    opts = opts || {};
+    var v = s.v2, m = s.month || {};
+    var app = $("app");
+    app.removeAttribute("data-state");
+    app.classList.remove("is-over", "is-under", "is-on", "is-min", "is-need", "sev1", "sev2", "sev3");
+
+    $("ctx").textContent = fmtDate(s.as_of) + "  ·  day " + m.day_of_month + " of " + m.days_in_month;
+    var g = greetingText(), ge = $("greet");
+    ge.textContent = g; ge.hidden = !g;
+
+    if (!v) {                                   // a pre-V2 cached state: wait for the server instead of showing old numbers
+      app.setAttribute("data-state", "boot");
+      $("status").textContent = "\u00a0";
+      renderEntries(false);
+      if (openKind && openKind !== "add") fillSheet(openKind);
+      return;
+    }
+
+    var ps = v.ready ? v.pace_status : "needs_position";
+    var word, cls, line;
+    if (ps === "behind") {
+      word = "BEHIND"; cls = "is-over";
+      line = "<b>" + money(-v.remaining_flexible) + "</b> short of protecting your plan.";
+    } else if (ps === "below_minimum") {
+      word = "BELOW MINIMUM"; cls = "is-min";
+      line = "<b>" + money(v.minimum_spend_gap) + "</b> below your daily minimum." +
+        (v.minimum_spend_gap_total > 0 ? " <b>" + money(v.minimum_spend_gap_total) + "</b> below it over the days left." : "");
+    } else if (ps === "on_pace") {
+      word = "ON PACE"; cls = "is-on";
+      line = "Staying on pace keeps your savings protected.";
+    } else {
+      word = "POSITION NEEDED"; cls = "is-need";
+      line = "Add what you have right now to see your pace.";
+    }
+    app.classList.add(cls);
+    var st = $("status"); st.textContent = word; st.classList.toggle("status--long", ps !== "on_pace");
+    $("diff").innerHTML = line;
+
+    var ready = !!v.ready;
+    $("todayPace").textContent = ready ? money(v.today_pace) : "\u2014";
+    $("spentLine").innerHTML = ready ? "<b>" + money(v.expenses_today) + "</b> spent today" : "\u2014";
+    var leftEl = $("leftLine");
+    if (ready) {
+      var rf = Number(v.remaining_flexible) || 0;
+      leftEl.innerHTML = "<b>" + money(Math.abs(rf)) + "</b> " + (rf < 0 ? "short" : "left");
+      leftEl.classList.toggle("over", rf < 0);
+    } else { leftEl.textContent = "\u2014"; leftEl.classList.remove("over"); }
+    $("barFill").style.width = (sliderFill(v) * 100).toFixed(1) + "%";
+
+    var tomorrow = ready && v.tomorrow_pace !== null && v.tomorrow_pace !== undefined ? Number(v.tomorrow_pace) : null;
+    $("tom").textContent = tomorrow === null ? "\u2014" : money(tomorrow) + " / day";
+    var rem = $("remain");
+    rem.textContent = ready ? money(v.remaining_flexible) : "\u2014";
+    rem.classList.toggle("neg", ready && v.remaining_flexible < 0);
+    $("prot").textContent = ready ? money(v.protected_money) : "\u2014";
+    $("days").textContent = ready ? (v.anchor_day ? v.pace_days : v.days_remaining_incl_today) + " days" : "\u2014";
+    $("daysK").innerHTML = ready && v.anchor_day ? "Days left &middot; from tomorrow" : "Days left &middot; incl. today";
+
+    // from-tomorrow change flash
+    var delta = $("tomDelta");
+    if (opts.showDelta && prevRemaining != null && tomorrow !== null && Math.round(prevRemaining) !== Math.round(tomorrow)) {
+      var dropped = tomorrow < prevRemaining;
+      delta.textContent = money(prevRemaining) + (dropped ? " ↓" : " ↑");
+      delta.className = "delta " + (dropped ? "drop" : "rise");
+      clearTimeout(deltaTimer);
+      deltaTimer = setTimeout(function () { delta.textContent = ""; delta.className = "delta"; }, 6000);
+    } else if (!opts.keepDelta) {
+      delta.textContent = "";
+      delta.className = "delta";
+    }
+
+    renderEntries(opts.inkLast);
+    $("err").hidden = true;
+    if (openKind && openKind !== "add") fillSheet(openKind);
+  }
+
+  function renderEntries(inkLast) {
+    var ul = $("entries");
+    ul.innerHTML = "";
+    var today = todaysExpenses().slice().reverse(); // newest first
+    if (!today.length) {
+      var li0 = document.createElement("li");
+      li0.className = "empty";
+      li0.textContent = "Nothing logged yet.";
+      ul.appendChild(li0);
+      return;
+    }
+    today.slice(0, 3).forEach(function (t, i) {
+      var li = document.createElement("li");
+      var n = document.createElement("span");
+      n.className = "n"; n.textContent = t.note || "Expense";
+      var a = document.createElement("span");
+      a.className = "a"; a.textContent = money(t.amount);
+      li.appendChild(n); li.appendChild(a);
+      if (inkLast && i === 0 && !prefersReduced()) li.className = "ink-in";
+      ul.appendChild(li);
+    });
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return "";
+    var parts = String(iso).split("-");
+    var months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    var mi = (parseInt(parts[1], 10) || 1) - 1;
+    return (months[mi] || "") + " " + parseInt(parts[2], 10) + ", " + parts[0];
+  }
+
+  function fatal(msg) {
+    var err = $("err");
+    err.textContent = msg;
+    err.hidden = false;
+    $("app").removeAttribute("data-state");
+  }
+
+  // ---- bottom sheets ---------------------------------------------------
+
+  var sheet = $("sheet"), sheetContent = $("sheetContent"), sheetTitle = $("sheetTitle");
+  var openKind = null, lastFocus = null, closeTimer = null;
+  var TITLES = { month: "This month", balance: "Balance", log: "Today’s entries", config: "Settings", add: "Log an expense", about: "Why Pace?" };
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function row(k, v, cls) {
+    var d = el("div");
+    d.appendChild(el("span", "rk", k));
+    d.appendChild(el("span", "rv" + (cls ? " " + cls : ""), v));
+    return d;
+  }
+
+  function fillSheet(kind) {
+    var s = store.state, cfg = store.settings || {}, inp = (s && s.inputs) || {};
+    sheetTitle.textContent = TITLES[kind] || "";
+    sheetContent.innerHTML = "";
+
+    if (kind === "month" && s) {
+      var v2 = s.v2, w = el("div", "rows");
+      if (v2 && v2.ready) {
+        w.appendChild(row("Spent since your balance", money(v2.expenses_since_balance)));
+        w.appendChild(row("Savings target (protected)", money(v2.savings_target)));
+        w.appendChild(row("Unpaid commitments (protected)", money(v2.remaining_commitments)));
+        w.appendChild(row("Remaining flexible", money(v2.remaining_flexible), v2.remaining_flexible < 0 ? "over" : ""));
+        w.appendChild(row("Today's pace", money(v2.today_pace) + " / day"));
+        w.appendChild(row("Pace from tomorrow", v2.tomorrow_pace === null ? "\u2014" : money(v2.tomorrow_pace) + " / day"));
+        w.appendChild(row("Days left (incl. today)", String(v2.days_remaining_incl_today)));
+        w.appendChild(row("Period ends", fmtDate(v2.period_end)));
+      } else {
+        w.appendChild(row("Position", "not set yet"));
+      }
+      sheetContent.appendChild(w);
+
+    } else if (kind === "balance" && s) {
+      var bv = s.v2;
+      if (bv && bv.ready) {
+        sheetContent.appendChild(el("p", "big-num", money(bv.effective_balance)));
+        sheetContent.appendChild(el("p", "note-line",
+          "You said you had " + money(bv.current_balance) + " on " + fmtDate(bv.current_balance_date) +
+          ". Expenses you log since then are taken off; income is never added for you."));
+      } else {
+        sheetContent.appendChild(el("p", "big-num", "\u2014"));
+        sheetContent.appendChild(el("p", "note-line", "Set what you have available right now to see your balance."));
+      }
+
+    } else if (kind === "log" && s) {
+      renderLogSheet(); // today's entries with per-row Edit / Delete
+
+    } else if (kind === "config") {
+      var c = el("div", "rows");
+      c.appendChild(row("Profile", PROFILE_LABEL[session && session.user] || (session && session.mode === "guest" ? "Guest (demo)" : "Signed in")));
+      // Currency selector (display unit only — no conversion)
+      var crow = el("div");
+      crow.appendChild(el("span", "rk", "Currency"));
+      var sel = document.createElement("select");
+      sel.className = "cur-select";
+      sel.setAttribute("aria-label", "Display currency");
+      var curNow = currentCurrency();
+      ["INR", "MAD", "IQD", "RUB"].forEach(function (code) {
+        var o = document.createElement("option");
+        o.value = code;
+        o.textContent = code + " — " + CURRENCIES[code].name;
+        if (code === curNow) o.selected = true;
+        sel.appendChild(o);
+      });
+      sel.addEventListener("change", function () {
+        setCurrency(sel.value);
+        render();            // repaint the whole app in the new currency (also refills this sheet)
+      });
+      crow.appendChild(sel);
+      c.appendChild(crow);
+
+      var pl = store.plan;
+      c.appendChild(row("Income", money(pl ? pl.income : cfg.monthly_income)));
+      c.appendChild(row("Savings target", money(pl ? pl.savings : cfg.monthly_savings_target)));
+      c.appendChild(row("Committed" + (pl && pl.commitments.length ? " (" + pl.commitments.length + ")" : ""), money(pl ? pl.fixed : cfg.fixed_monthly_expenses)));
+      c.appendChild(row("Current balance", pl && pl.current_balance != null ? money(pl.current_balance) : "Not set"));
+      sheetContent.appendChild(c);
+      if (store.plan && store.plan.editable) {
+        var mp = el("button", "txbtn plan-edit", "Edit Money Plan"); mp.type = "button";
+        mp.addEventListener("click", function () { closeSheet(); openPlan("edit"); });
+        var mpw = el("div", "acct"); mpw.appendChild(mp); sheetContent.appendChild(mpw);
+      }
+      sheetContent.appendChild(el("p", "hint",
+        "Currency sets the display unit only — Pace never converts your money, so the numbers stay the same." +
+        (store.plan && !store.plan.editable ? " The demo Money Plan is fixed." : "")));
+
+      // Account actions
+      var acct = el("div", "acct");
+      if (session && session.mode === "guest") {
+        var rst = el("button", "txbtn", "Reset demo"); rst.type = "button";
+        rst.addEventListener("click", function () { resetDemo(rst); });
+        acct.appendChild(rst);
+      }
+      var sw = el("button", "txbtn", "Switch user"); sw.type = "button";
+      sw.addEventListener("click", switchUser);
+      acct.appendChild(sw);
+      var lo = el("button", "txbtn", "Log out"); lo.type = "button";
+      lo.addEventListener("click", logout);
+      acct.appendChild(lo);
+      sheetContent.appendChild(acct);
+
+    } else if (kind === "add") {
+      sheetContent.appendChild(buildForm());
+
+    } else if (kind === "about") {
+      var ab = el("div", "about");
+      ab.appendChild(el("p", null, "Managing money shouldn't mean constantly checking balances, calculating budgets, or wondering if you've spent too much."));
+      ab.appendChild(el("p", null, "Pace turns your financial plan into a changing spending trajectory."));
+      var steps = el("p", "about__steps");
+      ["Set what you earn.", "Decide what you want to save.", "Pace tells you what you can spend while staying on track."].forEach(function (t, i) {
+        if (i) steps.appendChild(document.createElement("br"));
+        steps.appendChild(document.createTextNode(t));
+      });
+      ab.appendChild(steps);
+      ab.appendChild(el("p", "about__close", "It's not a fixed budget. It's your pace."));
+      sheetContent.appendChild(ab);
+    }
+  }
+
+  function buildForm() {
+    var form = el("form", "form");
+    form.noValidate = true;
+    var amt = el("div", "amount");
+    amt.appendChild(el("span", null, (CURRENCIES[currentCurrency()] || CURRENCIES.INR).symbol));
+    var amount = el("input");
+    amount.type = "number"; amount.inputMode = "decimal";
+    amount.step = "0.01"; amount.min = "0"; amount.placeholder = "0";
+    amount.id = "amountInput"; amount.setAttribute("aria-label", "Amount in rupees");
+    amt.appendChild(amount);
+    form.appendChild(amt);
+    var note = el("input", "note-field");
+    note.type = "text"; note.maxLength = 80;
+    note.placeholder = "what was it? (optional)";
+    note.id = "noteInput"; note.setAttribute("aria-label", "Note");
+    form.appendChild(note);
+    var btn = el("button", "submit", "Log expense");
+    btn.type = "submit";
+    form.appendChild(btn);
+    var msg = el("p", "form-msg"); msg.id = "formMsg"; msg.hidden = true;
+    form.appendChild(msg);
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      submitExpense(amount, note, btn, msg, form, false);
+    });
+    return form;
+  }
+
+  function submitExpense(amount, note, btn, msg, form, confirmed) {
+    if (submitting) return;                       // guard: ignore re-entry
+    var val = parseFloat(amount.value);
+    if (!isFinite(val) || val <= 0) {
+      flash(msg, "Enter an amount above zero.", "err");
+      amount.focus();
+      return;
+    }
+    if (!store.state) {                           // nothing to base optimism on yet
+      flash(msg, "Still loading — try again in a moment.", "err");
+      return;
+    }
+
+    // Expense Safety 1: sanity-check a large amount BEFORE any submit. The
+    // warning sits in front of the Phase-1B flow and never submits by itself;
+    // recomputed from the current amount each attempt (edits re-evaluate).
+    if (!confirmed && isLargeExpense(val)) {
+      showLargeConfirm(val, amount, note, btn, msg, form);
+      return;
+    }
+
+    submitting = true;
+    btn.disabled = true;                          // block double-tap
+    msg.hidden = true;
+
+    // Snapshot for rollback. The Phase-1A cache is NOT written here — it keeps
+    // the last server-authoritative state, so a reload during a pending POST
+    // never restores an unconfirmed optimistic transaction.
+    var prevState = store.state;
+    var prevTx = store.tx.slice();
+    prevRemaining = prevState.v2 && prevState.v2.tomorrow_pace != null ? Number(prevState.v2.tomorrow_pace) : NaN;
+
+    // 1. Optimistic: temp transaction + optimistic state, rendered instantly.
+    //    The transaction belongs to the user's LOCAL day (not server/UTC).
+    var dayKey = localDayKey();
+    var tempId = newTempId();
+    var noteVal = note.value.trim();
+    var tempTx = {
+      __tempId: tempId, __pending: true, row: null,
+      date: dayKey, amount: val, note: noteVal, type: "expense"
+    };
+    store.tx.push(tempTx);
+    store.state = computeOptimistic(prevState, val);
+    render({ showDelta: true, keepDelta: true, inkLast: true });
+
+    // 2. Everything derived from the optimistic state appears in this same
+    //    update: main Pace, Today's entries (rendered above), and the Undo bar.
+    //    The sheet closes NOW (no timer) so the page underneath is visible.
+    var undoT = { tempId: tempId, id: null, amount: val, cancelled: false };
+    showUndoBar(undoT);
+    amount.value = ""; note.value = "";
+    clearTimeout(closeTimer);
+    closeSheet();
+
+    // 3. Background POST — one logical POST, no follow-up GET. Server reconciles.
+    //    client_id makes the single conservative retry duplicate-safe.
+    apiPost({ action: "addTransaction", transaction: { amount: val, note: noteVal, type: "expense", client_id: newClientId(), date: dayKey }, today: dayKey })
+      .then(function (data) {
+        // replace the optimistic temp with the authoritative transaction + state
+        store.tx = store.tx.filter(function (t) { return t.__tempId !== tempId; });
+        if (data.transaction) store.tx.push(data.transaction);
+        if (data.state) store.state = data.state;   // server wins
+        var realId = data.transaction && data.transaction.transaction_id;
+        if (undoT.cancelled) {
+          // User tapped Undo before the server confirmed: the row now exists
+          // server-side, so delete it by its real id. performDelete removes it
+          // and shifts Pace in this same tick (no visible flash), then confirms.
+          saveCache();
+          if (realId) performDelete(realId);
+          return;
+        }
+        undoT.id = realId || null;                   // promote temp -> real id (bar stays as-is)
+        saveCache();                                 // persist confirmed state (Phase 1A)
+        clearSyncNote();
+        render({ keepDelta: true });                 // no re-ink; keep the delta flash
+      })
+      .catch(function () {
+        if (undoT.cancelled) return;                 // already undone locally; nothing recorded
+        // rollback: drop the optimistic tx + restore prior state; nothing was cached
+        store.tx = prevTx;
+        store.state = prevState;
+        if (undoTarget === undoT) { clearTimeout(undoTimer); hideUndoBar(); }
+        render();                                    // clears the optimistic delta too
+        showLogError("Couldn’t save “" + (noteVal || money(val)) + "”. Not recorded.");
+      })
+      .then(function () { submitting = false; });     // always release the guard
+  }
+
+  var flashTimer = null;
+  function flash(elm, text, kind) {
+    elm.textContent = text;
+    elm.className = "form-msg " + kind;
+    elm.hidden = false;
+    clearTimeout(flashTimer);
+    if (kind === "ok") flashTimer = setTimeout(function () { elm.hidden = true; }, 3000);
+  }
+
+  function openSheet(kind) {
+    clearTimeout(closeTimer);
+    openKind = kind;
+    lastFocus = document.activeElement;
+    sheet.querySelector(".sheet__card").classList.toggle("sheet__card--note", kind === "about");
+    fillSheet(kind);
+    sheet.hidden = false;
+    requestAnimationFrame(function () { sheet.classList.add("open"); });
+    var focusTarget = kind === "add"
+      ? sheetContent.querySelector("#amountInput")
+      : sheet.querySelector(".sheet__x");
+    if (focusTarget) focusTarget.focus();
+  }
+  function closeSheet() {
+    if (sheet.hidden) return;
+    openKind = null;
+    sheet.classList.remove("open");
+    var done = function () { sheet.hidden = true; sheet.removeEventListener("transitionend", done); };
+    sheet.addEventListener("transitionend", done);
+    setTimeout(done, 340);
+    if (lastFocus && lastFocus.focus) lastFocus.focus();
+  }
+
+  // ---- Money Plan (first-time setup + later edits) ---------------------
+  // The user gives Pace its boundaries: income, savings target, committed
+  // expenses. The backend validates, stores and recalculates - the numbers the
+  // previews show (available-to-spend, today's pace) come from the backend
+  // (`saveMoneyPlan` with dry_run). The only local arithmetic is the running
+  // sum shown while typing. Setup appears only when the server says the plan is
+  // genuinely missing/invalid (`plan.needs_setup`); valid existing settings are
+  // never touched. Periods stay calendar months (see PACE_CONTEXT).
+  var planOpen = false, planMode = "setup", planStep = 1, planDraft = null, planPreview = null, planBusy = false;
+  var PLAN_STEPS = 4;
+  var planOrig = null;      // what the editor opened with: only fields the user actually CHANGES are ever sent (an untouched balance never resets its anchor date)
+
+  function blankDraft() { return { income: "", savings: "", balance: "", commitments: [] }; }
+  function draftFromPlan(pl, blankIfSetup) {
+    if (!pl || (blankIfSetup && pl.needs_setup && !(pl.income > 0))) return blankDraft();
+    return {
+      income: String(pl.income), savings: String(pl.savings),
+      balance: pl.current_balance != null ? String(pl.current_balance) : "",
+      commitments: (pl.commitments || []).map(function (c) { return { id: c.id, name: c.name, amount: String(c.amount), status: c.status === "paid" ? "paid" : "unpaid", paid_at: c.paid_at || null }; })
+    };
+  }
+  function snapshotPlan(pl) {
+    if (!pl) return null;
+    return { income: Number(pl.income), savings: Number(pl.savings), balance: pl.current_balance != null ? Number(pl.current_balance) : null,
+      commitments: (pl.commitments || []).map(function (c) { return { name: c.name, amount: Number(c.amount), status: c.status === "paid" ? "paid" : "unpaid" }; }) };
+  }
+  function numOrNaN(v) { v = String(v == null ? "" : v).trim(); if (v === "") return NaN; var n = Number(v); return isFinite(n) ? n : NaN; }
+  // Clean draft -> payload; returns { error } or { plan, sums }.
+  function readDraft() {
+    var inc = numOrNaN(planDraft.income), sav = numOrNaN(planDraft.savings);
+    if (isNaN(inc) || inc < 0) return { error: "Enter your income (0 or more).", step: 1 };
+    if (isNaN(sav) || sav < 0) return { error: "Enter your savings target (0 or more).", step: 2 };
+    var list = [], fixed = 0, bad = null;
+    planDraft.commitments.forEach(function (c, i) {
+      var name = String(c.name || "").trim(), amt = numOrNaN(c.amount);
+      if (!name && String(c.amount).trim() === "") return;              // empty row: ignored
+      if (!name) { bad = bad || { error: "Give each commitment a name.", step: 3 }; return; }
+      if (isNaN(amt) || amt < 0) { bad = bad || { error: "“" + name + "” needs an amount (0 or more).", step: 3 }; return; }
+      var item = { name: name, amount: amt, status: c.status === "paid" ? "paid" : "unpaid" };
+      if (c.id) item.id = c.id;
+      list.push(item); fixed += amt;
+    });
+    if (bad) return bad;
+    if (sav + fixed > inc + 0.005) return { error: "Savings and commitments add up to more than your income.", step: 3 };
+    var bal = null;
+    if (planMode === "edit" && String(planDraft.balance == null ? "" : planDraft.balance).trim() !== "") {
+      bal = numOrNaN(planDraft.balance);
+      if (isNaN(bal) || bal < 0) return { error: "Enter what you have available now (0 or more).", step: 2 };
+    }
+    return { plan: { income: inc, savings: sav, commitments: list }, fixed: fixed, balance: bal, available: inc - sav - fixed };
+  }
+  // What did the user actually change? (compared with what the editor opened with)
+  function planChanges(r) {
+    var o = planOrig || { income: NaN, savings: NaN, balance: null, commitments: [] };
+    var same = r.plan.income === o.income && r.plan.savings === o.savings && r.plan.commitments.length === o.commitments.length &&
+      r.plan.commitments.every(function (c, i) { return c.name === o.commitments[i].name && c.amount === o.commitments[i].amount && c.status === o.commitments[i].status; });
+    return { planChanged: !same, balanceChanged: r.balance !== null && r.balance !== o.balance };
+  }
+  // Request body: a balance-only edit is a POSITION save (nothing else is rewritten); otherwise the full plan, plus
+  // current_balance ONLY when the user changed it. The balance date is always the device's local day (server-side default).
+  function planPayload(r, dry) {
+    var ch = planChanges(r), p;
+    if (!ch.planChanged && ch.balanceChanged) p = { position_only: true, current_balance: r.balance };
+    else {
+      p = { income: r.plan.income, savings: r.plan.savings, commitments: r.plan.commitments };
+      if (ch.balanceChanged) p.current_balance = r.balance;
+    }
+    if (dry) p.dry_run = true;
+    return p;
+  }
+
+  function openPlan(mode) {
+    planMode = mode; planStep = mode === "edit" ? 0 : 1; planPreview = null; planBusy = false;
+    planDraft = draftFromPlan(store.plan, mode === "setup");
+    planOrig = snapshotPlan(store.plan);
+    planOpen = true;
+    $("app").hidden = true; $("plan").hidden = false;
+    renderPlan();
+    window.scrollTo(0, 0);
+  }
+  function closePlan() {
+    planOpen = false; planDraft = null;
+    $("plan").hidden = true; $("app").hidden = false;
+    render();
+  }
+
+  function pAmountField(id, label, value, onInput) {
+    var w = el("div", "amount");
+    w.appendChild(el("span", null, (CURRENCIES[currentCurrency()] || CURRENCIES.INR).symbol));
+    var i = el("input");
+    i.type = "number"; i.inputMode = "decimal"; i.step = "0.01"; i.min = "0"; i.placeholder = "0";
+    i.id = id; i.value = value; i.setAttribute("aria-label", label);
+    i.addEventListener("input", function () { onInput(i.value); });
+    w.appendChild(i);
+    return w;
+  }
+  function pField(label, id, value, onInput) {          // labelled amount used in the single-page editor
+    var box = el("div", "plan__field");
+    var l = el("label", "label", label); l.setAttribute("for", id);
+    box.appendChild(l);
+    box.appendChild(pAmountField(id, label, value, onInput));
+    return box;
+  }
+  function pCommitments(totalEl, draft, showStatus, toggle) {
+    var dr = draft || planDraft;
+    var wrap = el("div", "plan__commits");
+    var list = el("ul", "plan__list");
+    function refreshTotal() {
+      var t = 0; dr.commitments.forEach(function (c) { var n = numOrNaN(c.amount); if (n > 0) t += n; });
+      totalEl.textContent = money(t);
+    }
+    function draw() {
+      list.innerHTML = "";
+      dr.commitments.forEach(function (c, idx) {
+        var li = el("li", "plan__row");
+        var nm = el("input", "plan__name"); nm.type = "text"; nm.maxLength = 40; nm.placeholder = "Rent"; nm.value = c.name;
+        nm.setAttribute("aria-label", "Commitment name");
+        nm.addEventListener("input", function () { c.name = nm.value; });
+        var am = el("input", "plan__amt"); am.type = "number"; am.inputMode = "decimal"; am.step = "0.01"; am.min = "0"; am.placeholder = "0";
+        am.value = c.amount; am.setAttribute("aria-label", "Commitment amount");
+        am.addEventListener("input", function () { c.amount = am.value; refreshTotal(); });
+        var del = el("button", "txbtn txbtn--del", "Delete"); del.type = "button";
+        del.setAttribute("aria-label", "Delete commitment");
+        del.addEventListener("click", function () { dr.commitments.splice(idx, 1); draw(); refreshTotal(); });
+        li.appendChild(nm); li.appendChild(am); li.appendChild(del);
+        if (showStatus && !toggle) li.appendChild(el("span", "plan__badge", "Not yet paid"));
+        if (showStatus && toggle) {
+          if (c.status !== "paid") c.status = "unpaid";
+          var pay = el("button", "plan__pay", ""); pay.type = "button";
+          var paintPay = function () {
+            var paid = c.status === "paid";
+            pay.classList.toggle("is-paid", paid);
+            pay.setAttribute("aria-pressed", paid ? "true" : "false");
+            pay.textContent = paid ? "\u2713 Paid" + (c.paid_at ? " \u00b7 " + fmtDate(c.paid_at).replace(/, \d{4}$/, "") : " \u00b7 today") + " \u2014 not protected"
+              : "\u2610 Not yet paid \u2014 protected";
+          };
+          pay.addEventListener("click", function () {
+            if (c.status === "paid") { c.status = "unpaid"; c.paid_at = null; } else { c.status = "paid"; }
+            paintPay();
+          });
+          paintPay();
+          li.appendChild(pay);
+        }
+        list.appendChild(li);
+      });
+      refreshTotal();
+    }
+    wrap.appendChild(list);
+    var add = el("button", "plan__add", "+ Add commitment"); add.type = "button";
+    add.addEventListener("click", function () {
+      dr.commitments.push({ name: "", amount: "" }); draw();
+      var ins = list.querySelectorAll(".plan__name"); if (ins.length) ins[ins.length - 1].focus();
+    });
+    wrap.appendChild(add);
+    draw();
+    return wrap;
+  }
+
+  function renderPlan() {
+    var root = $("plan");
+    root.innerHTML = "";
+    var edit = planMode === "edit";
+    var head = el("header", "plan__head");
+    head.appendChild(el("span", "brand", "Pace"));
+    if (edit) {
+      var cx = el("button", "nav__link", "Cancel"); cx.type = "button";
+      cx.addEventListener("click", closePlan);
+      head.appendChild(cx);
+    }
+    root.appendChild(head);
+    root.appendChild(el("h1", "plan__title", edit ? "Money Plan" : "Set up your Pace"));
+    if (!edit) root.appendChild(el("p", "label plan__step", "Step " + planStep + " of " + PLAN_STEPS));
+
+    var body = el("div", "plan__body");
+    var err = el("p", "plan__err"); err.setAttribute("role", "alert"); err.hidden = true;
+    function showErr(m) { err.textContent = m; err.hidden = !m; }
+    var actions = el("div", "gate__actions plan__actions");
+    function btn(text, cls, fn) { var b = el("button", cls, text); b.type = "button"; b.addEventListener("click", fn); actions.appendChild(b); return b; }
+
+    if (edit && planStep === 0) {
+      body.appendChild(pField("Monthly income", "pIncome", planDraft.income, function (v) { planDraft.income = v; }));
+      body.appendChild(pField("Savings target", "pSavings", planDraft.savings, function (v) { planDraft.savings = v; }));
+      var bf = pField("Current balance", "pBalance", planDraft.balance, function (v) { planDraft.balance = v; });
+      var pl0 = store.plan || {};
+      bf.appendChild(el("p", "hint plan__hint", "How much money you have available right now."));
+      bf.appendChild(el("p", "plan__asof", pl0.current_balance != null && pl0.current_balance_date
+        ? "As of " + fmtDate(pl0.current_balance_date) + ". Saving a new amount makes today your new starting point."
+        : "Not set yet. Add it to see your pace."));
+      body.appendChild(bf);
+      var ch = el("div", "plan__field");
+      ch.appendChild(el("span", "label", "Committed expenses"));
+      var tot0 = el("span", "plan__total");
+      var trow = el("p", "plan__sum"); trow.appendChild(el("span", null, "Total committed")); trow.appendChild(tot0);
+      ch.appendChild(pCommitments(tot0, null, true, true)); ch.appendChild(trow);
+      body.appendChild(ch);
+      body.appendChild(err);
+      root.appendChild(body);
+      btn("Review", "gate__go", function () {
+        var r = readDraft(); if (r.error) { showErr(r.error); return; }
+        var chg = planChanges(r);
+        if (!chg.planChanged && !chg.balanceChanged) { closePlan(); return; }      // nothing to save: no request
+        planStep = 4; renderPlan(); loadPreview();
+      });
+      root.appendChild(actions);
+      return;
+    }
+
+    if (planStep === 1) {
+      body.appendChild(el("p", "plan__q", "How much money do you expect this period?"));
+      body.appendChild(pAmountField("pIncome", "Monthly income", planDraft.income, function (v) { planDraft.income = v; }));
+      body.appendChild(err); root.appendChild(body);
+      btn("Next", "gate__go", function () {
+        var n = numOrNaN(planDraft.income);
+        if (isNaN(n) || n < 0) { showErr("Enter your income (0 or more)."); return; }
+        planStep = 2; renderPlan();
+      });
+    } else if (planStep === 2) {
+      body.appendChild(el("p", "plan__q", "How much do you want to save?"));
+      body.appendChild(pAmountField("pSavings", "Savings target", planDraft.savings, function (v) { planDraft.savings = v; }));
+      body.appendChild(err); root.appendChild(body);
+      btn("Back", "gate__back", function () { planStep = 1; renderPlan(); });
+      btn("Next", "gate__go", function () {
+        var n = numOrNaN(planDraft.savings);
+        if (isNaN(n) || n < 0) { showErr("Enter your savings target (0 or more)."); return; }
+        planStep = 3; renderPlan();
+      });
+    } else if (planStep === 3) {
+      body.appendChild(el("p", "plan__q", "How much is already committed?"));
+      body.appendChild(el("p", "hint plan__hint", "Rent, EMI, bills — anything fixed that leaves your account every month."));
+      var tot = el("span", "plan__total");
+      body.appendChild(pCommitments(tot));
+      var sum = el("p", "plan__sum"); sum.appendChild(el("span", null, "Total committed")); sum.appendChild(tot);
+      body.appendChild(sum);
+      body.appendChild(err); root.appendChild(body);
+      btn("Back", "gate__back", function () { planStep = 2; renderPlan(); });
+      btn("Next", "gate__go", function () {
+        var r = readDraft(); if (r.error) { showErr(r.error); return; }
+        planStep = 4; renderPlan(); loadPreview();
+      });
+    } else {
+      var r = readDraft();
+      if (r.error) { planStep = r.step; renderPlan(); return; }
+      body.appendChild(el("p", "plan__q", edit ? "Review your Money Plan" : "Your first page"));
+      var led = el("div", "rows plan__ledger");
+      var chg4 = planChanges(r);
+      led.appendChild(row("Monthly income", money(r.plan.income)));
+      led.appendChild(row("Savings target", money(r.plan.savings)));
+      var curBal = r.balance !== null ? r.balance : (planOrig ? planOrig.balance : null);
+      if (edit) led.appendChild(row("Current balance", curBal !== null ? money(curBal) + (chg4.balanceChanged ? " · from today" : "") : "Not set"));
+      led.appendChild(row("Committed expenses", money(r.fixed)));
+      if (edit) led.appendChild(row("Still unpaid (protected)", money(r.plan.commitments.reduce(function (t, c) { return t + (c.status === "paid" ? 0 : c.amount); }, 0))));
+      body.appendChild(led);
+      var pv = el("p", "plan__pace"); pv.id = "planPace";
+      body.appendChild(pv);
+      body.appendChild(err); root.appendChild(body);
+      btn("Back", "gate__back", function () { planStep = edit ? 0 : 3; renderPlan(); });
+      var go = btn(edit ? "Save Money Plan" : "Start my Pace", "gate__go", function () { savePlan(r.plan); });
+      go.id = "planGo"; go.disabled = !planPreview;
+      paintPreview();
+    }
+    root.appendChild(actions);
+    var f = root.querySelector("input"); if (f && planStep <= 2 && !planBusy) f.focus();
+  }
+
+  // Authoritative preview: the backend applies the same math it will use after saving.
+  function paintPreview(msg) {
+    var pv = $("planPace"), go = $("planGo");
+    if (!pv) return;
+    pv.className = "plan__pace";
+    if (planPreview) {
+      var st = planPreview.state || {}, m = st.month || {}, v2 = st.v2 || {};
+      pv.textContent = "";
+      if (v2.ready === false) {
+        pv.textContent = "Add your current balance to see your pace.";
+      } else {
+        pv.appendChild(el("span", "label", "Today\u2019s pace"));
+        pv.appendChild(el("span", "plan__pace-v", money(st.today_pace)));
+        pv.appendChild(el("span", "plan__pace-n", v2.pace_status === "behind"
+          ? "Behind: " + money(-v2.remaining_flexible) + " short of protecting your plan"
+          : "a day for the " + (v2.pace_days || v2.days_remaining_incl_today || m.days_remaining_incl_today || 0) + " days left" + (v2.anchor_day ? " after today" : " this month")));
+      }
+      if (go) go.disabled = planBusy;
+    } else {
+      pv.textContent = msg || "Calculating your pace\u2026";
+      if (msg) pv.classList.add("is-err");
+      if (go) go.disabled = true;
+    }
+  }
+  function loadPreview() {
+    var r = readDraft(); if (r.error) return;
+    planPreview = null; paintPreview();
+    var mine = planStep;
+    apiPost({ action: "saveMoneyPlan", today: localDayKey(), client_id: newClientId(), plan: planPayload(r, true) })
+      .then(function (d) { if (!planOpen || planStep !== mine) return; planPreview = d; paintPreview(); })
+      .catch(function (e) {
+        if (!planOpen || planStep !== mine) return;
+        paintPreview(e && e.business ? e.message : niceNetwork(e) + " Go back and try again.");
+      });
+  }
+
+  // Save: show the confirmed-by-backend preview immediately (optimistic), persist,
+  // then reconcile with the authoritative response; a failure restores everything.
+  function savePlan(plan) {
+    if (planBusy || !planPreview) return;
+    planBusy = true;
+    var prev = { state: store.state, plan: store.plan, settings: store.settings };
+    var draft = planDraft, mode = planMode;
+    var rNow = readDraft();     // computed BEFORE the editor closes (closePlan clears the draft)
+    store.state = planPreview.state; store.plan = planPreview.plan;
+    closePlan();
+    var payload = rNow.error ? { income: plan.income, savings: plan.savings, commitments: plan.commitments } : planPayload(rNow, false);
+    apiPost({ action: "saveMoneyPlan", today: localDayKey(), client_id: newClientId(), plan: payload })
+      .then(function (d) {
+        store.settings = d.settings; store.plan = d.plan; store.state = d.state;
+        clearSyncNote(); saveCache(); render(); planBusy = false;
+      })
+      .catch(function (e) {
+        store.state = prev.state; store.plan = prev.plan; store.settings = prev.settings;
+        planBusy = false;
+        planMode = mode; planDraft = draft; planStep = 4; planPreview = null; planOpen = true;
+        $("app").hidden = true; $("plan").hidden = false;
+        renderPlan();
+        var er = $("plan").querySelector(".plan__err");
+        if (er) { er.textContent = "Couldn\u2019t save — " + (e && e.business ? e.message : niceNetwork(e)) + " Nothing was changed."; er.hidden = false; }
+        loadPreview();
+      });
+  }
+
+  // ---- Onboarding (setup_state needs_plan) + position setup (needs_position) -------------
+  // ONE setup state machine (plan.setup_state from the backend): needs_plan -> full first-run onboarding
+  // (name, currency, income, savings, current balance, optional commitments) saved in ONE atomic
+  // saveMoneyPlan; needs_position -> a single question for existing users whose plan is already valid
+  // (position-only save: income/savings/commitments/transactions are never rewritten). The backend is the
+  // authority; the UI never computes Pace. A browser-local draft (per profile, no secrets) is only a
+  // convenience: server state always wins (a draft is dropped as soon as the server says the profile is set up).
+  var obDraft = null, obStep = 1, OB_STEPS = 6, obBusy = false;
+  function draftKey() { return "pace_draft_" + (session ? session.user : "NONE"); }
+  function saveDraft() { try { localStorage.setItem(draftKey(), JSON.stringify({ v: 1, step: obStep, d: obDraft })); } catch (e) {} }
+  function clearDraft() { try { localStorage.removeItem(draftKey()); } catch (e) {} }
+  function loadDraft() {
+    try {
+      var o = JSON.parse(localStorage.getItem(draftKey()) || "null");
+      if (!o || o.v !== 1 || !o.d || typeof o.d !== "object") return null;
+      var d = o.d, out = blankOb();
+      ["name", "currency", "income", "savings", "balance"].forEach(function (k) { if (typeof d[k] === "string") out[k] = d[k].slice(0, 60); });
+      if (Array.isArray(d.commitments)) out.commitments = d.commitments.slice(0, 30).map(function (c) { return { name: String((c && c.name) || "").slice(0, 40), amount: String((c && c.amount) || "").slice(0, 20) }; });
+      if (!CURRENCIES[out.currency]) out.currency = "";
+      return { step: clamp(Number(o.step) || 1, 1, OB_STEPS), d: out };
+    } catch (e) { return null; }
+  }
+  function blankOb() { return { name: "", currency: "", income: "", savings: "", balance: "", commitments: [] }; }
+  function localCurrencyChoice() {          // only a choice the user actually made on this device
+    try { var c = localStorage.getItem(currencyKey()); return c && CURRENCIES[c] ? c : ""; } catch (e) { return ""; }
+  }
+  function setupState() {
+    var p = store.plan;
+    if (!p) return "complete";
+    return p.setup_state || (p.needs_setup ? "needs_plan" : "complete");
+  }
+  function showSetupPage() { planOpen = true; $("app").hidden = true; $("plan").hidden = false; window.scrollTo(0, 0); }
+  function closeSetup() { planOpen = false; obDraft = null; obBusy = false; $("plan").hidden = true; $("app").hidden = false; render(); }
+
+  function openOnboard() {
+    planMode = "onboard"; obDraft = blankOb(); obStep = 1; obBusy = false;
+    var d = loadDraft();
+    if (d) { obDraft = d.d; obStep = d.step; }
+    if (!obDraft.currency) obDraft.currency = localCurrencyChoice();
+    showSetupPage(); renderOnboard();
+  }
+  function openPosition() {
+    planMode = "position"; obBusy = false; obDraft = { balance: "" };
+    showSetupPage(); renderPosition();
+  }
+  function maybeShowSetup() {
+    if (planOpen || !store.plan) return;
+    if (session && session.mode === "guest") return;              // guests keep the demo plan and are never onboarded
+    var st = setupState();
+    if (st === "needs_plan") openOnboard();
+    else if (st === "needs_position") openPosition();
+  }
+
+  function setupHead(root, title) {
+    var head = el("header", "plan__head");
+    head.appendChild(el("span", "brand", "Pace"));
+    var lo = el("button", "nav__link", "Log out"); lo.type = "button"; lo.addEventListener("click", logout);
+    head.appendChild(lo);
+    root.appendChild(head);
+    root.appendChild(el("h1", "plan__title", title));
+  }
+  function textField(id, label, value, onInput, max) {
+    var i = el("input", "plan__text"); i.type = "text"; i.id = id; i.value = value; i.maxLength = max || 40;
+    i.autocomplete = "off"; i.setAttribute("aria-label", label); i.spellcheck = false;
+    i.addEventListener("input", function () { onInput(i.value); });
+    return i;
+  }
+
+  // per-step validation (mirrors the backend; the backend re-validates everything)
+  function obError(step) {
+    var d = obDraft;
+    if (step === 1) {
+      var n = String(d.name || "").trim();
+      if (!n) return "Tell us what to call you.";
+      if (n.length > 40) return "Keep it to 40 characters or fewer.";
+      if (/[\u0000-\u001f\u007f]/.test(n)) return "Please use plain letters and numbers.";
+    }
+    if (step === 2 && !CURRENCIES[d.currency]) return "Choose a currency.";
+    if (step === 3) { var inc = numOrNaN(d.income); if (isNaN(inc) || inc <= 0) return "Enter your monthly income (more than 0)."; }
+    if (step === 4) { var sv = numOrNaN(d.savings); if (isNaN(sv) || sv < 0) return "Enter your savings target (0 or more)."; }
+    if (step === 5) { var b = numOrNaN(d.balance); if (isNaN(b) || b < 0) return "Enter what you have available now (0 or more)."; }
+    if (step === 6) {
+      var sum = 0, bad = null;
+      d.commitments.forEach(function (c) {
+        var nm = String(c.name || "").trim(), am = numOrNaN(c.amount);
+        if (!nm && String(c.amount).trim() === "") return;
+        if (!nm) { bad = bad || "Give each commitment a name."; return; }
+        if (isNaN(am) || am <= 0) { bad = bad || "“" + nm + "” needs an amount above 0."; return; }
+        sum += am;
+      });
+      if (bad) return bad;
+      if (numOrNaN(d.savings) + sum > numOrNaN(d.income) + 0.005) return "Savings and commitments add up to more than your income.";
+    }
+    return "";
+  }
+  function obCommitList() {
+    return obDraft.commitments.filter(function (c) { return String(c.name || "").trim() || String(c.amount).trim() !== ""; })
+      .map(function (c) { return { name: String(c.name).trim(), amount: numOrNaN(c.amount) }; });
+  }
+
+  function renderOnboard() {
+    var root = $("plan"); root.innerHTML = "";
+    setupHead(root, "Set up your Pace");
+    root.appendChild(el("p", "label plan__step", "Step " + obStep + " of " + OB_STEPS));
+    var form = el("form", "plan__form"); form.noValidate = true;
+    var body = el("div", "plan__body");
+    var err = el("p", "plan__err"); err.setAttribute("role", "alert"); err.hidden = true;
+    var d = obDraft;
+    function q(t) { body.appendChild(el("p", "plan__q", t)); }
+    if (obStep === 1) {
+      q("What should we call you?");
+      body.appendChild(textField("obName", "Your name", d.name, function (v) { d.name = v; }));
+    } else if (obStep === 2) {
+      q("Which currency do you use?");
+      var fs = el("fieldset", "plan__opts"); var lg = el("legend", "label", "Currency"); lg.className = "label plan__legend"; fs.appendChild(lg);
+      ["INR", "MAD", "IQD", "RUB"].forEach(function (code) {
+        var lab = el("label", "plan__opt"); var r = el("input"); r.type = "radio"; r.name = "obCur"; r.value = code; r.checked = d.currency === code;
+        r.addEventListener("change", function () { d.currency = code; setCurrency(code); });
+        lab.appendChild(r); lab.appendChild(el("span", null, CURRENCIES[code].symbol + "  " + code + " — " + CURRENCIES[code].name));
+        fs.appendChild(lab);
+      });
+      body.appendChild(fs);
+    } else if (obStep === 3) {
+      q("How much do you earn each month?");
+      body.appendChild(pAmountField("obIncome", "Monthly income", d.income, function (v) { d.income = v; }));
+    } else if (obStep === 4) {
+      q("How much do you want to save each month?");
+      body.appendChild(pAmountField("obSavings", "Monthly savings target", d.savings, function (v) { d.savings = v; }));
+    } else if (obStep === 5) {
+      q("How much money do you have available right now?");
+      body.appendChild(el("p", "hint plan__hint", "This is what you actually have available today."));
+      body.appendChild(pAmountField("obBalance", "Money available now", d.balance, function (v) { d.balance = v; }));
+    } else {
+      q("Anything already committed?");
+      body.appendChild(el("p", "hint plan__hint", "Optional — rent, EMI, bills you already know you will pay. You can skip this."));
+      var tot = el("span", "plan__total");
+      body.appendChild(pCommitments(tot, d, true));
+      var sum = el("p", "plan__sum"); sum.appendChild(el("span", null, "Total committed")); sum.appendChild(tot);
+      body.appendChild(sum);
+    }
+    body.appendChild(err);
+    form.appendChild(body);
+    var actions = el("div", "gate__actions plan__actions");
+    if (obStep > 1) {
+      var back = el("button", "gate__back", "Back"); back.type = "button";
+      back.addEventListener("click", function () { obStep -= 1; saveDraft(); renderOnboard(); });
+      actions.appendChild(back);
+    }
+    var go = el("button", "gate__go", obStep === OB_STEPS ? "Start my Pace" : "Next"); go.type = "submit"; go.id = "obGo";
+    actions.appendChild(go);
+    form.appendChild(actions);
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      if (obBusy) return;
+      var m = obError(obStep);
+      if (m) { err.textContent = m; err.hidden = false; return; }
+      if (obStep < OB_STEPS) { obStep += 1; saveDraft(); renderOnboard(); return; }
+      for (var s = 1; s <= OB_STEPS; s++) { var em = obError(s); if (em) { obStep = s; saveDraft(); renderOnboard(); var e2 = $("plan").querySelector(".plan__err"); e2.textContent = em; e2.hidden = false; return; } }
+      saveOnboard(go, err);
+    });
+    root.appendChild(form);
+    var f = form.querySelector("input:not([type=radio]), input[type=radio]:checked, input[type=radio]");
+    if (f) f.focus();
+  }
+  function finishSetup(data) {
+    store.settings = data.settings; store.plan = data.plan; store.state = data.state;
+    clearDraft(); clearSyncNote(); saveCache(); closeSetup();
+  }
+  function saveOnboard(go, err) {
+    obBusy = true; go.disabled = true; go.textContent = "Saving…"; err.hidden = true;
+    var d = obDraft, chosenCur = d.currency;
+    apiPost({ action: "saveMoneyPlan", today: localDayKey(), client_id: newClientId(), plan: {
+      require_complete: true, display_name: String(d.name).trim(), currency: d.currency,
+      income: numOrNaN(d.income), savings: numOrNaN(d.savings), current_balance: numOrNaN(d.balance), commitments: obCommitList() } })
+      .then(function (data) { setCurrency(chosenCur); finishSetup(data); })
+      .catch(function (e) {
+        obBusy = false; go.disabled = false; go.textContent = "Start my Pace";
+        if (e && e.business && /already set up/i.test(e.message)) { clearDraft(); planOpen = false; load(); return; }   // server wins
+        err.textContent = "Couldn’t save — " + (e && e.business ? e.message : niceNetwork(e)) + " Your answers are still here.";
+        err.hidden = false;
+      });
+  }
+
+  function renderPosition() {
+    var root = $("plan"); root.innerHTML = "";
+    setupHead(root, "Let’s get your current position.");
+    var form = el("form", "plan__form"); form.noValidate = true;
+    var body = el("div", "plan__body");
+    body.appendChild(el("p", "plan__q", "How much money do you have available right now?"));
+    body.appendChild(el("p", "hint plan__hint", "This is what you actually have available today."));
+    body.appendChild(pAmountField("posBalance", "Money available now", obDraft.balance, function (v) { obDraft.balance = v; }));
+    var err = el("p", "plan__err"); err.setAttribute("role", "alert"); err.hidden = true;
+    body.appendChild(err);
+    form.appendChild(body);
+    var actions = el("div", "gate__actions plan__actions");
+    var go = el("button", "gate__go", "Continue"); go.type = "submit"; go.id = "posGo";
+    actions.appendChild(go); form.appendChild(actions);
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      if (obBusy) return;
+      var b = numOrNaN(obDraft.balance);
+      if (isNaN(b) || b < 0) { err.textContent = "Enter what you have available now (0 or more)."; err.hidden = false; return; }
+      obBusy = true; go.disabled = true; go.textContent = "Saving…"; err.hidden = true;
+      var plan = { position_only: true, current_balance: b };
+      if (store.plan && !store.plan.currency) plan.currency = currentCurrency();     // persist the currency they already see; a stored one is never overwritten
+      apiPost({ action: "saveMoneyPlan", today: localDayKey(), client_id: newClientId(), plan: plan })
+        .then(finishSetup)
+        .catch(function (e2) {
+          obBusy = false; go.disabled = false; go.textContent = "Continue";
+          err.textContent = "Couldn’t save — " + (e2 && e2.business ? e2.message : niceNetwork(e2)) + " Your answer is still here.";
+          err.hidden = false;
+        });
+    });
+    root.appendChild(form);
+    $("posBalance").focus();
+  }
+
+  // ---- access gate + account actions ------------------------------------
+
+  function onAuthLost(actualUser) {
+    // The SERVER rejected the session (expired/invalid) or resolved a different
+    // profile (tampering): drop that profile's session + cache (and the actual
+    // profile's, if it differs), then reload to the gate with a message so
+    // nothing from the old session stays on screen. (A network failure never
+    // gets here - only an explicit `unauthorized` / mismatch does.)
+    var u = session && session.user;
+    try {
+      localStorage.removeItem(cacheKey());
+      if (actualUser) localStorage.removeItem("pace_cache_v1_" + actualUser);
+    } catch (e) {}
+    clearSession(u); if (actualUser) clearSession(actualUser);
+    clearActive(); session = null;
+    setNotice(EXPIRED_MSG);
+    location.reload();
+  }
+  function switchUser() {
+    // Leave the active profile but KEEP every saved session + cache, so coming
+    // back to a signed-in profile needs no access code. Reload = clean slate.
+    clearActive(); session = null;
+    location.reload();
+  }
+  function logout() {
+    // Explicit sign-out: remove ONLY the current profile's session + cache.
+    var u = session && session.user;
+    try { localStorage.removeItem(cacheKey()); localStorage.removeItem(draftKey()); } catch (e) {}
+    clearSession(u); clearActive(); session = null;
+    location.reload();
+  }
+  function resetDemo(btn) {
+    btn.disabled = true; btn.textContent = "Resetting…";
+    apiPostOnce({ action: "resetGuest", today: localDayKey() })
+      .then(function (d) {
+        store.state = d.state; store.settings = d.settings; store.tx = d.transactions || []; store.plan = d.plan || null;
+        saveCache(); hideUndoBar(); render();
+      })
+      .catch(function (err) { showLogError("Couldn’t reset the demo — " + niceNetwork(err)); })
+      .then(function () { btn.disabled = false; btn.textContent = "Reset demo"; });
+  }
+
+  function updateProfileTag() {
+    var t = $("profileTag"); if (!t) return;
+    var demo = session && session.mode === "guest";
+    t.hidden = !demo; t.textContent = demo ? "demo" : "";
+  }
+  function showApp() { $("gate").hidden = true; $("app").hidden = false; updateProfileTag(); }
+  // Notebook-style date written at the top of the page (device-local day, like localDayKey()).
+  function paintGateDate() {
+    var d = new Date(), el = $("gateDate");
+    if (!el) return;
+    var wd = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()];
+    var mo = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()];
+    el.textContent = wd + ", " + d.getDate() + " " + mo + " " + d.getFullYear();
+  }
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) paintGateDate(); });
+  function showGate() {
+    $("app").hidden = true; $("gate").hidden = false;
+    paintGateDate();
+    gateChoices();
+    playIntro();
+  }
+  // Quiet "opening the ledger" reveal: once per browser session, CSS only, never
+  // waits for the network and never blocks a click. Skipped for reduced motion.
+  var INTRO_KEY = "pace_intro_seen";
+  function playIntro() {
+    try { if (sessionStorage.getItem(INTRO_KEY)) return; sessionStorage.setItem(INTRO_KEY, "1"); } catch (e) {}
+    if (prefersReduced()) return;
+    var w = $("gateWelcome"), g = $("gate");
+    w.classList.add("intro"); g.classList.add("intro-page");
+    setTimeout(function () { w.classList.remove("intro"); g.classList.remove("intro-page"); }, 900);
+  }
+  // Move between sections of the same page: outgoing fades ~90ms, incoming eases in ~180ms.
+  var swapping = false;
+  function swapView(from, to, after) {
+    if (swapping) return;
+    if (prefersReduced()) { from.hidden = true; to.hidden = false; if (after) after(); return; }
+    swapping = true;
+    from.classList.add("leave");
+    setTimeout(function () {
+      from.hidden = true; from.classList.remove("leave");
+      to.hidden = false; to.classList.add("enter");
+      if (after) after();
+      setTimeout(function () { to.classList.remove("enter"); swapping = false; }, 190);
+    }, 90);
+  }
+  // A saved, unexpired session for `u` (expired ones are dropped with their cache).
+  function validSavedSession(u) {
+    var s = loadSession(u);
+    if (!s) return null;
+    if (sessionExpired(s)) {
+      clearSession(u);
+      try { localStorage.removeItem("pace_cache_v1_" + u); } catch (e) {}
+      return null;
+    }
+    return s;
+  }
+  function activate(s) {                  // enter a profile that already has a valid session (no network wait)
+    session = s; setActive(s.user); showApp(); load();
+  }
+  function gateChoices() {                // the Welcome view (static, local - renders instantly)
+    $("gateWelcome").hidden = false; $("gateForm").hidden = true;
+    $("gateErr").hidden = true; $("gateCode").value = "";
+  }
+  function gateError(msg) { var e = $("gateErr"); e.textContent = msg; e.hidden = false; }
+  function welcomeNote(msg) { var e = $("welcomeNote"); e.textContent = msg || ""; e.hidden = !msg; }
+  function enterSession(data) {
+    session = { token: data.token, user: data.user, mode: data.mode };
+    saveSession(session);
+    $("gateCode").value = "";
+    showApp();
+    load();
+  }
+  function startCode() {                  // Sign in: the access code alone identifies the profile (server-side)
+    welcomeNote("");
+    $("gateErr").hidden = true;
+    swapView($("gateWelcome"), $("gateForm"), function () { $("gateCode").focus(); });
+  }
+  function backToWelcome() {
+    $("gateCode").value = ""; $("gateErr").hidden = true;      // never keep a typed code around
+    swapView($("gateForm"), $("gateWelcome"), function () { $("gateSignIn").focus(); });
+  }
+  function doLogin() {
+    var code = $("gateCode").value;
+    if (!code) { gateError("Enter your access code."); return; }
+    var go = $("gateGo"); go.disabled = true; go.textContent = "Checking…"; $("gateErr").hidden = true;
+    apiPostOnce({ action: "login", code: code })
+      .then(enterSession)
+      .catch(function (err) {
+        gateError(err && err.business ? err.message : niceNetwork(err));
+        $("gateCode").select();
+      })
+      .then(function () { go.disabled = false; go.textContent = "CONTINUE"; });
+  }
+  function doGuest() {
+    // Feel immediate: paint the (skeleton) app now, get the guest session in the background.
+    showApp();
+    apiPostOnce({ action: "guest" })
+      .then(enterSession)
+      .catch(function (err) {
+        showGate();
+        welcomeNote(err && err.business ? err.message : niceNetwork(err));
+      });
+  }
+
+  // ---- boot ------------------------------------------------------------
+
+  function load() {
+    if (!API) { fatal("Not configured — paste your /exec URL into config.js"); return; }
+
+    // 1. Hydrate instantly from cache if we have a valid one (no skeleton).
+    var cached = loadCache();
+    var hydrated = false;
+    if (cached) {
+      store.state = cached.state;
+      store.settings = cached.settings;
+      store.tx = cached.tx;
+      store.plan = cached.plan;
+      render();          // paints last-known numbers immediately
+      hydrated = true;
+      maybeShowSetup();  // a cached "needs setup" profile goes straight to setup (no flash of a blank Pace)
+    }
+
+    // 2. Always revalidate in the background against the authoritative server.
+    var epoch0 = dataEpoch;
+    apiGet("all")
+      .then(function (d) {
+        if (d.user && session && d.user.key !== session.user) { onAuthLost(d.user.key); return; }
+        if (epoch0 !== dataEpoch) return;     // a write happened while this read was in flight: its answer is stale, the write's response is newer
+        store.state = d.state;
+        store.settings = d.settings;
+        store.tx = d.transactions || [];
+        store.plan = d.plan || null;
+        clearSyncNote();
+        render();        // server data wins
+        saveCache();     // refresh the mirror
+        if (planOpen && (planMode === "onboard" || planMode === "position") && !obBusy && setupState() === "complete") {
+          clearDraft(); closeSetup();               // the server says this profile is already set up: server wins
+        } else {
+          maybeShowSetup();                         // needs_plan -> onboarding, needs_position -> position setup
+        }
+      })
+      .catch(function (err) {
+        if (hydrated) {
+          // keep the cached view usable; just flag that sync didn't happen
+          showSyncNote();
+        } else {
+          // no cache to fall back on — preserve the original first-load error
+          fatal(niceNetwork(err));
+        }
+      });
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    Array.prototype.forEach.call(document.querySelectorAll("[data-sheet]"), function (b) {
+      b.addEventListener("click", function () { openSheet(b.getAttribute("data-sheet")); });
+    });
+    $("add").addEventListener("click", function () { openSheet("add"); });
+    Array.prototype.forEach.call(sheet.querySelectorAll("[data-close]"), function (b) {
+      b.addEventListener("click", closeSheet);
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && !sheet.hidden) { closeSheet(); return; }
+      if (e.key === "Tab" && !sheet.hidden) {            // keep keyboard focus inside the open sheet
+        var f = sheet.querySelectorAll("button, input, select, [href], [tabindex]:not([tabindex='-1'])");
+        f = Array.prototype.filter.call(f, function (n) { return !n.disabled && n.offsetParent !== null; });
+        if (!f.length) return;
+        var first = f[0], last = f[f.length - 1];
+        if (!sheet.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+        else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    });
+
+    // gate wiring
+    $("gateSignIn").addEventListener("click", startCode);
+    $("gateGuest").addEventListener("click", function () {
+      var s = validSavedSession("GUEST");                 // reuse an unexpired guest session (24h)
+      if (s) activate(s); else doGuest();
+    });
+    $("gateBack").addEventListener("click", backToWelcome);
+    $("gateForm").addEventListener("submit", function (e) { e.preventDefault(); doLogin(); });
+
+    // The old single global cache belonged to the pre-multi-user app; never reuse it.
+    try { localStorage.removeItem("pace_cache_v1"); } catch (e) {}
+
+    // Bootstrap the local session, then render from cache; the server validates in
+    // the background (load()). The gate shows only when there is no usable session.
+    migrateLegacySession();
+    var active = getActive();
+    session = active ? loadSession(active) : null;
+    if (session && sessionExpired(session)) {           // known-expired locally: no network needed
+      try { localStorage.removeItem(cacheKey()); } catch (e) {}
+      clearSession(session.user); session = null; setNotice(EXPIRED_MSG);
+    }
+    if (!session && active) clearActive();              // pointer without a usable session
+    if (session) { showApp(); load(); }                 // returning user: instant shell + cached numbers
+    else {
+      showGate();
+      var note = takeNotice(); if (note) welcomeNote(note);
+    }
+  });
+})();

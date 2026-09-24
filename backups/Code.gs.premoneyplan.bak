@@ -1,0 +1,949 @@
+/**
+ * Pace - personal finance MVP backend (Google Apps Script)
+ *
+ * Core question: "Am I spending too much?"
+ *
+ * Data lives in a Google Sheet with two tabs:
+ *   Settings      - key / value configuration
+ *   Transactions  - Date | Amount | Note | Type
+ *
+ * This script is bound to that spreadsheet (Extensions > Apps Script).
+ * It exposes a tiny JSON API over doGet / doPost so the HTML frontend
+ * (built later) can call it with fetch().
+ */
+
+// --- Sheet / schema constants -------------------------------------------------
+
+var SETTINGS_SHEET = 'Settings';
+var TRANSACTIONS_SHEET = 'Transactions';
+
+// Settings keys we expect. Values are numbers unless noted.
+var SETTINGS_KEYS = [
+  'monthly_income',
+  'monthly_savings_target',
+  'fixed_monthly_expenses',
+  'starting_balance',
+  'starting_balance_date', // ISO date string, e.g. 2026-09-07
+  'metro_weekday_cost',
+  'weekly_auto_cost'
+];
+
+// Allowed transaction types.
+var TX_TYPES = ['expense', 'income'];
+
+// --- One-time setup ---------------------------------------------------------
+
+/**
+ * Run once from the Apps Script editor to create the tabs, headers and
+ * seed the initial configuration. Safe to re-run: it will not duplicate
+ * rows, but it will overwrite Settings values with the seeds below.
+ */
+function setupSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  var settings = ss.getSheetByName(SETTINGS_SHEET) || ss.insertSheet(SETTINGS_SHEET);
+  settings.clear();
+  settings.getRange(1, 1, 1, 2).setValues([['key', 'value']]);
+  var seed = [
+    ['monthly_income', 45000],
+    ['monthly_savings_target', 10000],
+    ['fixed_monthly_expenses', 16500],
+    ['starting_balance', 25000],
+    ['starting_balance_date', '2026-09-07'],
+    ['metro_weekday_cost', 135],
+    ['weekly_auto_cost', 60]
+  ];
+  settings.getRange(2, 1, seed.length, 2).setValues(seed);
+  settings.setFrozenRows(1);
+
+  var tx = ss.getSheetByName(TRANSACTIONS_SHEET) || ss.insertSheet(TRANSACTIONS_SHEET);
+  if (tx.getLastRow() === 0) {
+    tx.getRange(1, 1, 1, 5).setValues([['Date', 'Amount', 'Note', 'Type', 'ID']]);
+    tx.setFrozenRows(1);
+  }
+
+  // Drop the default empty sheet if it is still around.
+  var def = ss.getSheetByName('Sheet1');
+  if (def && ss.getSheets().length > 1) ss.deleteSheet(def);
+}
+
+// --- Core read / write helpers --------------------------------------------
+
+/**
+ * Read the Settings tab into a plain object. Numeric-looking values are
+ * returned as numbers; everything else stays a string.
+ */
+function readSettings(ctx) {
+  var sheet = setSheet_(ctx);
+  if (!sheet) throw new Error('Settings sheet not found.');
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return {}; // header only / empty - getRange(...,0,...) would throw
+
+  var rows = sheet.getRange(2, 1, lastRow - 1, 2).getValues();
+  var out = {};
+  rows.forEach(function (r) {
+    var key = String(r[0]).trim();
+    if (!key) return;
+    var val = r[1];
+    if (typeof val === 'string' && val.trim() !== '' && !isNaN(Number(val))) {
+      val = Number(val);
+    }
+    out[key] = val;
+  });
+  return out;
+}
+
+/**
+ * Read all transactions, newest first. Dates are returned as ISO strings.
+ */
+function readTransactions(ctx) {
+  var sheet = txSheet_(ctx);
+  if (!sheet) throw new Error('Transactions sheet not found.');
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  // Columns: A Date | B Amount | C Note | D Type | E ID (transaction_id).
+  var values = sheet.getRange(2, 1, lastRow - 1, 5).getValues();
+  var list = [];
+  for (var i = 0; i < values.length; i++) {
+    var r = values[i];
+    if (r[0] === '' && r[1] === '') continue; // skip blank/ghost rows
+    list.push({
+      row: i + 2,                              // REAL sheet row (i indexes from row 2)
+      transaction_id: String(r[4] || ''),      // stable id (may be '' pre-migration)
+      date: toIsoDate(r[0]),
+      amount: Number(r[1]) || 0,
+      note: String(r[2] || ''),
+      type: String(r[3] || 'expense')
+    });
+  }
+
+  list.sort(function (a, b) { return a.date < b.date ? 1 : a.date > b.date ? -1 : 0; });
+  return list;
+}
+
+/**
+ * Idempotent migration: give every dataful row a stable transaction_id in
+ * column E, exactly once. Only column E is ever written (A-D untouched), so
+ * dates/amounts/notes/types and all historical Pace results are preserved.
+ * Re-running is a no-op once every row has an id. Returns how many were filled.
+ * Callers hold the script lock.
+ */
+function ensureTransactionIds(ctx) {
+  var sheet = txSheet_(ctx);
+  if (!sheet) return 0;
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 1) return 0;
+
+  if (String(sheet.getRange(1, 5).getValue()).trim() === '') {
+    sheet.getRange(1, 5).setValue('ID'); // header for column E
+  }
+  if (lastRow < 2) return 0;
+
+  var ab = sheet.getRange(2, 1, lastRow - 1, 2).getValues();  // A,B to detect blank rows
+  var idRange = sheet.getRange(2, 5, lastRow - 1, 1);         // column E only
+  var ids = idRange.getValues();
+  var changed = false, filled = 0;
+  for (var i = 0; i < ab.length; i++) {
+    if (ab[i][0] === '' && ab[i][1] === '') continue;         // blank/ghost row
+    if (String(ids[i][0] || '').trim() === '') {
+      ids[i][0] = Utilities.getUuid();
+      changed = true; filled++;
+    }
+  }
+  if (changed) idRange.setValues(ids);                         // writes ONLY column E
+  return filled;
+}
+
+/** Find the real sheet row for a transaction_id, or 0 if not present. */
+function findRowById(sheet, id) {
+  id = String(id || '').trim();
+  if (!id) return 0;
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 0;
+  var vals = sheet.getRange(2, 1, lastRow - 1, 5).getValues();
+  for (var i = 0; i < vals.length; i++) {
+    if (String(vals[i][4] || '').trim() === id) return i + 2;
+  }
+  return 0;
+}
+
+/**
+ * Append one transaction. `input` = { date?, amount, note?, type, client_id? }.
+ * date defaults to today; type defaults to 'expense'.
+ *
+ * All validation runs BEFORE any write, so a malformed request throws (caught by
+ * doPost -> clean JSON error) without touching the sheet. The write itself is
+ * serialized with a script lock. An optional `client_id` gives idempotency: the
+ * same id inside a short window is treated as a duplicate and NOT appended
+ * (dormant until a client sends one - identical-content requests are never
+ * deduped, since logging the same expense twice is legitimate).
+ */
+function addTransaction(ctx, input) {
+  var sheet = txSheet_(ctx);
+  if (!sheet) throw new Error('Transactions sheet not found.');
+  // The shared demo tab must not grow without bound.
+  if (ctx.mode === 'guest' && sheet.getLastRow() > GUEST_MAX_ROWS) {
+    throw new Error('demo is full - use Reset demo');
+  }
+
+  // amount: numeric, finite, strictly positive (rejects NaN and Infinity).
+  var amount = Number(input && input.amount);
+  if (!isFinite(amount) || amount <= 0) {
+    throw new Error('amount must be a positive number');
+  }
+
+  var type = String((input && input.type) || 'expense').toLowerCase();
+  if (TX_TYPES.indexOf(type) === -1) {
+    throw new Error('type must be one of: ' + TX_TYPES.join(', '));
+  }
+
+  // date: normalise to yyyy-MM-dd in the script timezone; fall back to today if
+  // the supplied value cannot be parsed to a real calendar date.
+  var date = toIsoDate((input && input.date) || new Date());
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) date = toIsoDate(new Date());
+
+  var note = String((input && input.note) || '');
+  var id = Utilities.getUuid(); // stable transaction_id for this new row
+
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(8000);
+  } catch (e) {
+    throw new Error('server busy, please retry');
+  }
+  try {
+    var clientId = input && input.client_id;
+    if (clientId) {
+      var cache = CacheService.getScriptCache();
+      var key = 'tx_' + ctx.userKey + '_' + String(clientId); // per-user idempotency namespace
+      var seen = cache.get(key);
+      if (seen) {
+        // Same client_id within the window: return the SAME logical transaction
+        // (its original id) and do NOT append again.
+        return { transaction_id: seen, date: date, amount: amount, note: note, type: type, duplicate: true };
+      }
+      cache.put(key, id, 90); // 90s idempotency window; stores the id we will use
+    }
+    sheet.appendRow([date, amount, note, type, id]); // E = transaction_id
+  } finally {
+    lock.releaseLock();
+  }
+  return { transaction_id: id, date: date, amount: amount, note: note, type: type };
+}
+
+/**
+ * Update one existing transaction, addressed by transaction_id. Only fields the
+ * product supports are editable: amount and note (date/type unchanged for now).
+ * Idempotent by nature: applying the same absolute values twice is a no-op, so a
+ * timeout-retry is safe. The transaction_id never changes (an edit is NOT a new
+ * transaction). Serialized with the script lock; only the intended row is touched.
+ */
+function updateTransaction(ctx, input) {
+  var sheet = txSheet_(ctx);
+  if (!sheet) throw new Error('Transactions sheet not found.');
+  var id = String((input && input.transaction_id) || '').trim();
+  if (!id) throw new Error('transaction_id is required');
+
+  var hasAmount = input && input.amount !== undefined && input.amount !== null && input.amount !== '';
+  var amount;
+  if (hasAmount) {
+    amount = Number(input.amount);
+    if (!isFinite(amount) || amount <= 0) throw new Error('amount must be a positive number');
+  }
+  var hasNote = input && input.note !== undefined;
+  var note = hasNote ? String(input.note || '') : null;
+
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(8000); } catch (e) { throw new Error('server busy, please retry'); }
+  try {
+    ensureTransactionIds(ctx);
+    var rowNum = findRowById(sheet, id);
+    if (!rowNum) throw new Error('transaction not found');
+    var cur = sheet.getRange(rowNum, 1, 1, 5).getValues()[0]; // A..E
+    var newAmount = hasAmount ? amount : (Number(cur[1]) || 0);
+    var newNote = hasNote ? note : String(cur[2] || '');
+    // write only B (amount) and C (note); A/D/E untouched
+    sheet.getRange(rowNum, 2, 1, 2).setValues([[newAmount, newNote]]);
+    return {
+      transaction_id: id,
+      date: toIsoDate(cur[0]),
+      amount: newAmount,
+      note: newNote,
+      type: String(cur[3] || 'expense')
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Delete one transaction, addressed by transaction_id. Idempotent: deleting an
+ * id that is already gone returns success (already_absent) rather than an error,
+ * so a timeout-retry never double-deletes or hits a spurious failure. Verifies
+ * the id still exists before removing exactly that row. Serialized with the lock.
+ */
+function deleteTransaction(ctx, input) {
+  var sheet = txSheet_(ctx);
+  if (!sheet) throw new Error('Transactions sheet not found.');
+  var id = String((input && input.transaction_id) || '').trim();
+  if (!id) throw new Error('transaction_id is required');
+
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(8000); } catch (e) { throw new Error('server busy, please retry'); }
+  try {
+    ensureTransactionIds(ctx);
+    var rowNum = findRowById(sheet, id);
+    if (!rowNum) return { deleted_transaction_id: id, already_absent: true };
+    sheet.deleteRow(rowNum);
+    return { deleted_transaction_id: id };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// --- Financial state -------------------------------------------------------
+
+/**
+ * The whole point of the app: a small snapshot that answers
+ * "am I spending too much?" - now with a DYNAMIC pace that recomputes as
+ * money is spent, always protecting the savings target.
+ *
+ * Model (flat, dynamic):
+ *   total_spendable = (income - savings_target - fixed_expenses), prorated to
+ *                     the period days: discretionary_monthly * period_days / days_in_month
+ *   period          = start_date (or 1st of month, whichever is later) .. month end
+ *
+ *   The core question is "how much can I spend per REMAINING day and still hit
+ *   my savings target?". So pace divides money-left by days-left:
+ *
+ *   today_pace     = (total_spendable - expenses_BEFORE_today) / days_remaining_incl_today
+ *                    -> the line today is judged against; today's own spend does
+ *                       NOT change it (no self-inflation), but prior days do.
+ *   remaining_pace = (total_spendable - expenses_THROUGH_today) / days_remaining_after_today
+ *                    -> the pace that applies from tomorrow onward.
+ *   By construction today_pace(day N) == remaining_pace(day N-1).
+ *
+ *   Overspend is counted once (the whole transaction is in expenses); it is
+ *   never subtracted twice. All divisors are guarded; paces never go negative
+ *   (a blown budget yields pace 0 and status 'over').
+ *
+ * current_balance = starting_balance + income_since_start - expense_since_start
+ */
+function calculateState(ctx, clientToday) {
+  var s = readSettings(ctx);
+  var tx = readTransactions(ctx);
+  // "Today" is the USER's local calendar day when the client supplies it
+  // (Local Time V1); otherwise fall back to the server's date. Deriving y/m/d
+  // from the YYYY-MM-DD key (integer calendar math) keeps month boundaries
+  // tz-independent. Math is identical when clientToday == server today.
+  var todayIso = (typeof clientToday === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(clientToday))
+    ? clientToday
+    : toIsoDate(new Date());
+
+  var income = num(s.monthly_income);
+  var savings = num(s.monthly_savings_target);
+  var fixed = num(s.fixed_monthly_expenses);
+  var startBalance = num(s.starting_balance);
+  // Sheets may store the date cell as a Date object, not the "YYYY-MM-DD"
+  // string. Normalise so the `t.date >= startDate` comparison stays valid.
+  var startDate = s.starting_balance_date ? toIsoDate(s.starting_balance_date) : todayIso;
+
+  var discretionaryMonthly = income - savings - fixed;
+
+  var year = Number(todayIso.slice(0, 4));
+  var month = Number(todayIso.slice(5, 7)) - 1; // 0-based
+  var daysInMonth = new Date(year, month + 1, 0).getDate();
+  var dayOfMonth = Number(todayIso.slice(8, 10));
+  var monthPrefix = todayIso.slice(0, 7); // YYYY-MM
+
+  // The experiment starts on starting_balance_date, so pace must elapse from
+  // that day - not from the 1st of the month. The "period" runs from the later
+  // of (start date, 1st) through the month end.
+  var startsThisMonth = String(startDate).slice(0, 7) === monthPrefix;
+  var periodStartDay = startsThisMonth ? Number(String(startDate).slice(8, 10)) : 1;
+  var periodDays = daysInMonth - periodStartDay + 1;
+  var elapsedDays = Math.min(dayOfMonth, daysInMonth) - periodStartDay + 1;
+  if (elapsedDays < 0) elapsedDays = 0;
+
+  // Total money spendable across the whole period (savings target protected).
+  var totalSpendable = discretionaryMonthly * (periodDays / daysInMonth);
+  var initialPace = periodDays > 0 ? totalSpendable / periodDays : 0;
+
+  // Days remaining, counted two ways.
+  var daysRemainingIncl = daysInMonth - dayOfMonth + 1; // today .. period end
+  var daysRemainingAfter = daysInMonth - dayOfMonth;     // tomorrow .. period end
+  if (daysRemainingIncl < 1) daysRemainingIncl = 1;
+  if (daysRemainingAfter < 0) daysRemainingAfter = 0;
+
+  // Split period expenses into before-today vs today, and tally income/balance.
+  var expensesBeforeToday = 0;
+  var expensesToday = 0;
+  var incomeThisMonth = 0;
+  var incomeSinceStart = 0;
+  var expenseSinceStart = 0;
+
+  tx.forEach(function (t) {
+    if (t.date >= startDate) {
+      if (t.type === 'income') incomeSinceStart += t.amount;
+      else expenseSinceStart += t.amount;
+    }
+    if (t.date.slice(0, 7) === monthPrefix) {
+      if (t.type === 'income') {
+        incomeThisMonth += t.amount;
+      } else if (t.type === 'expense') {
+        if (t.date < todayIso) expensesBeforeToday += t.amount;
+        else if (t.date === todayIso) expensesToday += t.amount;
+      }
+    }
+  });
+
+  var expensesPeriod = expensesBeforeToday + expensesToday;
+
+  // Dynamic pace. Spendable-before-today spread over today + the days left; the
+  // guard keeps it non-negative if prior spending already blew the budget.
+  var spendableBeforeToday = Math.max(totalSpendable - expensesBeforeToday, 0);
+  var todayPace = spendableBeforeToday / daysRemainingIncl;
+
+  // What is left after today, and the pace that applies from tomorrow.
+  var remainingSpendable = totalSpendable - expensesPeriod; // may be negative
+  var remainingPace = daysRemainingAfter > 0
+    ? Math.max(remainingSpendable, 0) / daysRemainingAfter
+    : 0;
+
+  // Today's numbers, judged against the start-of-today pace.
+  var expectedToday = todayPace;
+  var todayVariance = expensesToday - todayPace; // positive => over today
+
+  // Straight-line month view (for the secondary "this month" panel).
+  var expectedToDate = initialPace * elapsedDays;
+  var pace = expensesPeriod - expectedToDate; // positive => ahead of the line
+
+  var currentBalance = startBalance + incomeSinceStart - expenseSinceStart;
+
+  // Status: today's spend vs today's pace, compared at FULL precision (never
+  // rounded display values). A small absolute+relative tolerance keeps rounding
+  // noise from flapping the status near the line. If the whole period's budget
+  // is already gone, that dominates.
+  var eps = Math.max(0.5, todayPace * 0.005); // ~half a rupee or 0.5%
+  var status;
+  if (remainingSpendable <= 0) {
+    status = 'over';                            // budget exhausted / exceeded
+  } else if (expensesToday > todayPace + eps) {
+    status = 'over';                            // spent_today > today_pace
+  } else if (expensesToday < todayPace - eps) {
+    status = 'under';                           // spent_today < today_pace
+  } else {
+    status = 'on_track';                        // spent_today ~= today_pace
+  }
+
+  return {
+    as_of: todayIso,
+    inputs: {
+      monthly_income: income,
+      monthly_savings_target: savings,
+      fixed_monthly_expenses: fixed,
+      fixed_expenses: fixed,                 // alias of fixed_monthly_expenses
+      starting_balance: startBalance,
+      starting_balance_date: startDate
+    },
+    month: {
+      key: monthPrefix,
+      day_of_month: dayOfMonth,
+      days_in_month: daysInMonth,
+      days_in_period: periodDays,
+      days_elapsed: elapsedDays,
+      days_remaining: daysRemainingAfter,           // strictly AFTER today
+      days_remaining_incl_today: daysRemainingIncl, // includes today
+      days_left: daysRemainingAfter                 // alias of days_remaining
+    },
+    discretionary_monthly: round2(discretionaryMonthly),
+    total_spendable: round2(totalSpendable),
+    initial_daily_pace: round2(initialPace),
+
+    // today (start-of-today pace; today's own spend does not move it)
+    daily_allowance: round2(todayPace),   // kept name; == today_pace
+    today_pace: round2(todayPace),
+    spent_today: round2(expensesToday),
+    expected_today: round2(expectedToday),
+    today_variance: round2(todayVariance),
+
+    // forward-looking, dynamic
+    remaining_spendable: round2(remainingSpendable),
+    remaining_pace: round2(remainingPace),
+    remaining_discretionary: round2(remainingSpendable),          // back-compat alias
+    safe_daily_for_rest_of_month: round2(remainingPace),          // back-compat alias
+
+    // month view
+    expected_spend_to_date: round2(expectedToDate),
+    actual_spend_to_date: round2(expensesPeriod),
+    income_this_month: round2(incomeThisMonth),
+    pace: round2(pace),
+
+    status: status, // 'over' | 'under' | 'on_track'
+    current_balance: round2(currentBalance),
+    transaction_count: tx.length
+  };
+}
+
+// --- Multi-user: access codes, sessions, routing ---------------------------
+//
+// Lightweight private MVP access (NOT equivalent to OAuth). Three profiles:
+//   MUHAMMED, FRIEND  - private, require an access code
+//   GUEST             - shared demo data, no code
+//
+// Flow:  POST login {profile, code}  ->  signed session token
+//        every other request carries {token}; the backend verifies the
+//        signature + expiry, resolves token -> user_key -> USERS row -> that
+//        user's TX_/SET_ tabs, and operates ONLY there. A client-supplied
+//        user_key, sheet name or user id is never used for authorization.
+//
+// Secrets: only SHA-256 HASHES of access codes live in the USERS sheet; the
+// session-signing secret lives in Script Properties (SESSION_SECRET, created
+// on first use). No raw secret appears in this source or in the frontend.
+
+var USERS_SHEET = 'USERS';
+var SESSION_TTL_USER_SEC = 30 * 24 * 3600; // private profiles: 30 days
+var SESSION_TTL_GUEST_SEC = 24 * 3600;     // guest: 24 hours
+var LOGIN_MAX_FAILS = 8;                   // failed attempts per profile ...
+var LOGIN_LOCK_SEC = 900;                  // ... within 15 minutes => locked
+var GUEST_MAX_ROWS = 300;                  // cap on the shared demo tab
+var USERS_META_TTL_SEC = 300;              // resolved-user cache (active flag lags <=5 min)
+
+function sha256Hex_(s) {
+  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(s), Utilities.Charset.UTF_8);
+  return bytes.map(function (b) {
+    var v = (b < 0 ? b + 256 : b).toString(16);
+    return v.length === 1 ? '0' + v : v;
+  }).join('');
+}
+
+// Length-independent-ish string compare (avoids early-exit timing leaks).
+function safeEq_(a, b) {
+  a = String(a); b = String(b);
+  if (a.length !== b.length) return false;
+  var r = 0;
+  for (var i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return r === 0;
+}
+
+function sessionSecret_() {
+  var props = PropertiesService.getScriptProperties();
+  var s = props.getProperty('SESSION_SECRET');
+  if (s) return s;
+  var lock = LockService.getScriptLock();
+  lock.waitLock(8000);
+  try {
+    s = props.getProperty('SESSION_SECRET');
+    if (!s) {
+      s = Utilities.getUuid() + Utilities.getUuid() + Utilities.getUuid();
+      props.setProperty('SESSION_SECRET', s);
+    }
+  } finally {
+    lock.releaseLock();
+  }
+  return s;
+}
+
+function sign_(payloadB64) {
+  return Utilities.base64EncodeWebSafe(
+    Utilities.computeHmacSha256Signature(payloadB64, sessionSecret_()));
+}
+
+// token = base64url(JSON{u,e}) + '.' + base64url(HMAC-SHA256(payload, secret))
+function issueToken_(userKey, ttlSec) {
+  var payload = Utilities.base64EncodeWebSafe(JSON.stringify({
+    u: userKey,
+    e: Math.floor(Date.now() / 1000) + ttlSec
+  }));
+  return payload + '.' + sign_(payload);
+}
+
+// Returns the user_key for a valid, unexpired token; otherwise ''.
+function verifyToken_(token) {
+  token = String(token || '');
+  var dot = token.indexOf('.');
+  if (dot < 1 || token.length > 600) return '';
+  var payload = token.slice(0, dot), sig = token.slice(dot + 1);
+  if (!safeEq_(sig, sign_(payload))) return '';
+  var obj;
+  try {
+    obj = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(payload)).getDataAsString());
+  } catch (e) { return ''; }
+  if (!obj || !obj.u || !obj.e || obj.e < Math.floor(Date.now() / 1000)) return '';
+  return String(obj.u);
+}
+
+// Fresh read of the USERS tab (includes hashes - never cached, never returned).
+function readUsers_() {
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(USERS_SHEET);
+  var out = {};
+  if (!sh) return out;
+  var last = sh.getLastRow();
+  if (last < 2) return out;
+  var vals = sh.getRange(2, 1, last - 1, 6).getValues();
+  vals.forEach(function (v) {
+    var key = String(v[0] || '').trim().toUpperCase();
+    if (!key) return;
+    out[key] = {
+      userKey: key,
+      hash: String(v[1] || '').trim().toLowerCase(),
+      tx: String(v[2] || '').trim(),
+      set: String(v[3] || '').trim(),
+      mode: String(v[4] || '').trim().toLowerCase(),
+      active: String(v[5]).trim().toLowerCase() === 'true'
+    };
+  });
+  return out;
+}
+
+// Cached routing metadata (no hashes).
+function usersMeta_() {
+  var cache = CacheService.getScriptCache();
+  var hit = cache.get('USERS_META_V1');
+  if (hit) { try { return JSON.parse(hit); } catch (e) {} }
+  var users = readUsers_(), meta = {};
+  Object.keys(users).forEach(function (k) {
+    var u = users[k];
+    meta[k] = { userKey: u.userKey, tx: u.tx, set: u.set, mode: u.mode, active: u.active };
+  });
+  cache.put('USERS_META_V1', JSON.stringify(meta), USERS_META_TTL_SEC);
+  return meta;
+}
+
+// Session -> user context. THE authorization step: everything downstream uses
+// only the ctx returned here, never anything else from the request.
+function resolveCtx_(token) {
+  var key = verifyToken_(token);
+  if (!key) throw new Error('unauthorized');
+  var m = usersMeta_()[key];
+  if (!m || !m.active) throw new Error('unauthorized');
+  // Defensive: a user row may only point at its own TX_/SET_ tabs.
+  if (!/^TX_[A-Z0-9_]+$/.test(m.tx) || !/^SET_[A-Z0-9_]+$/.test(m.set)) {
+    throw new Error('unauthorized');
+  }
+  return { userKey: key, tx: m.tx, set: m.set, mode: m.mode };
+}
+
+function txSheet_(ctx) {
+  return SpreadsheetApp.getActiveSpreadsheet().getSheetByName(ctx.tx);
+}
+function setSheet_(ctx) {
+  return SpreadsheetApp.getActiveSpreadsheet().getSheetByName(ctx.set);
+}
+
+// POST login {profile, code} -> {token, user, mode}. The profile only chooses
+// WHICH hash to compare against; the access code is what authorizes.
+function login_(body) {
+  var key = String((body && body.profile) || '').trim().toUpperCase();
+  var code = String((body && body.code) || '');
+  if (!/^[A-Z0-9_]{1,20}$/.test(key) || !code || code.length > 200) {
+    throw new Error('invalid access code');
+  }
+  var cache = CacheService.getScriptCache();
+  var failKey = 'fail_' + key;
+  var fails = Number(cache.get(failKey) || 0);
+  if (fails >= LOGIN_MAX_FAILS) throw new Error('too many attempts - try again in a few minutes');
+  var u = readUsers_()[key];
+  var ok = !!(u && u.active && u.mode === 'user' && u.hash && safeEq_(sha256Hex_(code), u.hash));
+  if (!ok) {
+    cache.put(failKey, String(fails + 1), LOGIN_LOCK_SEC);
+    throw new Error('invalid access code');
+  }
+  cache.remove(failKey);
+  return { token: issueToken_(key, SESSION_TTL_USER_SEC), user: key, mode: 'user' };
+}
+
+// POST guest {} -> guest session (no code). Only ever issues the GUEST profile.
+function guestLogin_() {
+  var u = readUsers_()['GUEST'];
+  if (!u || !u.active || u.mode !== 'guest') throw new Error('guest mode unavailable');
+  seedGuestIfEmpty_();
+  return { token: issueToken_('GUEST', SESSION_TTL_GUEST_SEC), user: 'GUEST', mode: 'guest' };
+}
+
+// --- Demo data + migration ---------------------------------------------------
+
+function isoDaysAgo_(n) {
+  var d = new Date();
+  d.setDate(d.getDate() - n);
+  return toIsoDate(d);
+}
+function firstOfMonthIso_() {
+  return toIsoDate(new Date()).slice(0, 7) + '-01';
+}
+
+function guestSettings_() {
+  return [
+    ['monthly_income', 45000],
+    ['monthly_savings_target', 10000],
+    ['fixed_monthly_expenses', 16500],
+    ['starting_balance', 25000],
+    ['starting_balance_date', firstOfMonthIso_()],
+    ['metro_weekday_cost', 135],
+    ['weekly_auto_cost', 60]
+  ];
+}
+
+function friendSettings_() {
+  return [
+    ['monthly_income', 30000],
+    ['monthly_savings_target', 5000],
+    ['fixed_monthly_expenses', 10000],
+    ['starting_balance', 0],
+    ['starting_balance_date', toIsoDate(new Date())],
+    ['metro_weekday_cost', 0],
+    ['weekly_auto_cost', 0]
+  ];
+}
+
+// Realistic demo entries over the last few days of THIS month only.
+function guestTransactions_() {
+  var plan = [
+    [3, 'Groceries', 420], [3, 'Coffee', 60],
+    [2, 'Lunch', 180], [2, 'Metro', 40], [2, 'Snacks', 55],
+    [1, 'Auto', 90], [1, 'Dinner', 260], [1, 'Chai', 20],
+    [0, 'Breakfast', 90], [0, 'Coffee', 50]
+  ];
+  var monthPrefix = toIsoDate(new Date()).slice(0, 7);
+  var rows = [];
+  plan.forEach(function (p) {
+    var date = isoDaysAgo_(p[0]);
+    if (date.slice(0, 7) !== monthPrefix) return; // don't spill into last month
+    rows.push([date, p[2], p[1], 'expense', Utilities.getUuid()]);
+  });
+  return rows;
+}
+
+function ensureTxTab_(ss, name) {
+  var sh = ss.getSheetByName(name);
+  if (!sh) {
+    sh = ss.insertSheet(name);
+    sh.getRange(1, 1, 1, 5).setValues([['Date', 'Amount', 'Note', 'Type', 'ID']]);
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+function ensureSettingsTab_(ss, name, rows) {
+  var sh = ss.getSheetByName(name);
+  if (!sh) {
+    sh = ss.insertSheet(name);
+    sh.getRange(1, 1, 1, 2).setValues([['key', 'value']]);
+    if (rows && rows.length) sh.getRange(2, 1, rows.length, 2).setValues(rows);
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+function seedGuestIfEmpty_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var tx = ensureTxTab_(ss, 'TX_GUEST');
+  ensureSettingsTab_(ss, 'SET_GUEST', guestSettings_());
+  if (tx.getLastRow() < 2) {
+    var rows = guestTransactions_();
+    if (rows.length) tx.getRange(2, 1, rows.length, 5).setValues(rows);
+  }
+}
+
+// POST resetGuest (guest session only): wipe + reseed the shared demo tabs.
+function resetGuest_(ctx) {
+  if (ctx.mode !== 'guest') throw new Error('unauthorized');
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(8000); } catch (e) { throw new Error('server busy, please retry'); }
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var tx = ensureTxTab_(ss, 'TX_GUEST');
+    if (tx.getLastRow() > 1) tx.deleteRows(2, tx.getLastRow() - 1);
+    var set = ensureSettingsTab_(ss, 'SET_GUEST', guestSettings_());
+    set.getRange(2, 1, guestSettings_().length, 2).setValues(guestSettings_());
+    var rows = guestTransactions_();
+    if (rows.length) tx.getRange(2, 1, rows.length, 5).setValues(rows);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * ONE-TIME, run from the Apps Script editor by the owner. COPY-FIRST and
+ * idempotent: creates USERS + the per-user tabs, and copies the legacy
+ * Transactions / Settings tabs into TX_MUH / SET_MUH with Sheet.copyTo (values,
+ * formats, ids preserved). It NEVER deletes or modifies the legacy tabs and
+ * never overwrites an existing destination tab. Access-code hashes are left
+ * blank - the owner pastes them into USERS!B2:B3 (see docs).
+ */
+function migrateToMultiUser() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var report = [];
+
+  var users = ss.getSheetByName(USERS_SHEET);
+  if (!users) {
+    users = ss.insertSheet(USERS_SHEET);
+    users.getRange(1, 1, 1, 6).setValues([['user_key', 'access_credential_hash', 'tx_sheet', 'settings_sheet', 'mode', 'active']]);
+    users.getRange(2, 1, 3, 6).setValues([
+      ['MUHAMMED', '', 'TX_MUH', 'SET_MUH', 'user', true],
+      ['FRIEND', '', 'TX_FRIEND', 'SET_FRIEND', 'user', true],
+      ['GUEST', '', 'TX_GUEST', 'SET_GUEST', 'guest', true]
+    ]);
+    users.setFrozenRows(1);
+    report.push('USERS created');
+  } else {
+    report.push('USERS already exists (left as-is)');
+  }
+
+  [['Transactions', 'TX_MUH'], ['Settings', 'SET_MUH']].forEach(function (pair) {
+    var src = ss.getSheetByName(pair[0]), dst = ss.getSheetByName(pair[1]);
+    if (dst) { report.push(pair[1] + ' already exists (not overwritten)'); return; }
+    if (!src) { report.push('legacy ' + pair[0] + ' missing - skipped'); return; }
+    var copy = src.copyTo(ss);
+    copy.setName(pair[1]);
+    report.push(pair[1] + ' copied from ' + pair[0] + ' (' + (src.getLastRow() - 1) + ' data rows)');
+  });
+
+  // Make sure every migrated transaction has a stable id (writes only column E).
+  var lock = LockService.getScriptLock();
+  lock.waitLock(8000);
+  try {
+    report.push('ids filled in TX_MUH: ' + ensureTransactionIds({ tx: 'TX_MUH' }));
+  } finally {
+    lock.releaseLock();
+  }
+
+  ensureTxTab_(ss, 'TX_FRIEND');
+  ensureSettingsTab_(ss, 'SET_FRIEND', friendSettings_());
+  report.push('FRIEND tabs ready (empty history, default settings)');
+
+  seedGuestIfEmpty_();
+  report.push('GUEST tabs ready (demo data)');
+
+  CacheService.getScriptCache().remove('USERS_META_V1');
+  Logger.log(report.join('\n'));
+  return report;
+}
+
+// --- HTTP API ------------------------------------------------------------
+
+/**
+ * GET is limited to an unauthenticated health check. Reading data over GET
+ * would put the session token in the URL, so reads are POST (action 'all').
+ */
+function doGet(e) {
+  var action = (e && e.parameter && e.parameter.action) || 'ping';
+  if (action === 'ping') return jsonOut({ ok: true, action: 'ping', data: { ok: true } });
+  return jsonOut({ ok: false, error: 'unauthorized' });
+}
+
+/**
+ * POST body (JSON, sent as text/plain):
+ *   public:    { action:'login', profile, code }   { action:'guest' }
+ *   session:   { token, action:'all'|'addTransaction'|'updateTransaction'|
+ *                'deleteTransaction'|'resetGuest', today?, transaction? }
+ * Every session action resolves token -> ctx first and only touches ctx tabs.
+ */
+function doPost(e) {
+  try {
+    var body = {};
+    if (e && e.postData && e.postData.contents) {
+      body = JSON.parse(e.postData.contents);
+    }
+    var action = body.action;
+
+    if (action === 'login') return jsonOut({ ok: true, action: action, data: login_(body) });
+    if (action === 'guest') return jsonOut({ ok: true, action: action, data: guestLogin_() });
+
+    var ctx = resolveCtx_(body.token);          // throws 'unauthorized'
+    var clientToday = body.today;               // user's local day (display only)
+    var user = { key: ctx.userKey, mode: ctx.mode };
+
+    if (action === 'all') {
+      var lock = LockService.getScriptLock();
+      try { if (lock.tryLock(8000)) { try { ensureTransactionIds(ctx); } finally { lock.releaseLock(); } } } catch (e2) {}
+      return jsonOut({ ok: true, action: action, data: {
+        user: user,
+        settings: readSettings(ctx),
+        transactions: readTransactions(ctx),
+        state: calculateState(ctx, clientToday)
+      } });
+    }
+
+    if (action === 'addTransaction') {
+      var created = addTransaction(ctx, body.transaction || {});
+      return jsonOut({ ok: true, action: action, data: { transaction: created, state: calculateState(ctx, clientToday) } });
+    }
+
+    if (action === 'updateTransaction') {
+      var updated = updateTransaction(ctx, body.transaction || {});
+      return jsonOut({ ok: true, action: action, data: { transaction: updated, state: calculateState(ctx, clientToday) } });
+    }
+
+    if (action === 'deleteTransaction') {
+      var del = deleteTransaction(ctx, body.transaction || {});
+      return jsonOut({ ok: true, action: action, data: {
+        deleted_transaction_id: del.deleted_transaction_id,
+        already_absent: !!del.already_absent,
+        state: calculateState(ctx, clientToday)
+      } });
+    }
+
+    if (action === 'resetGuest') {
+      resetGuest_(ctx);
+      return jsonOut({ ok: true, action: action, data: {
+        user: user,
+        settings: readSettings(ctx),
+        transactions: readTransactions(ctx),
+        state: calculateState(ctx, clientToday)
+      } });
+    }
+
+    return jsonOut({ ok: false, error: 'unknown action: ' + action });
+  } catch (err) {
+    return jsonOut({ ok: false, error: String(err && err.message || err) });
+  }
+}
+
+// --- Small utilities -----------------------------------------------------
+
+function jsonOut(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function toIsoDate(value) {
+  if (value instanceof Date) {
+    return Utilities.formatDate(value, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+  var str = String(value).trim();
+  // Already YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}/.test(str)) return str.slice(0, 10);
+  var d = new Date(str);
+  if (!isNaN(d.getTime())) {
+    return Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+  return str;
+}
+
+function num(v) {
+  var n = Number(v);
+  return isNaN(n) ? 0 : n;
+}
+
+function round2(n) {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
+// Count Mon-Fri days in [from, to] inclusive. `from` / `to` are Date objects;
+// only the calendar day is used. Returns 0 when the range is empty/backwards.
+function countWeekdays(from, to) {
+  var d = new Date(from.getFullYear(), from.getMonth(), from.getDate());
+  var end = new Date(to.getFullYear(), to.getMonth(), to.getDate());
+  var n = 0;
+  while (d <= end) {
+    var wd = d.getDay(); // 0 = Sun .. 6 = Sat
+    if (wd >= 1 && wd <= 5) n++;
+    d.setDate(d.getDate() + 1);
+  }
+  return n;
+}
