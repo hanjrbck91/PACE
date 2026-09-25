@@ -113,11 +113,6 @@
       </div>
     </section>
 
-    <aside class="checkin" id="checkin" aria-labelledby="checkinK" hidden>
-      <span class="label" id="checkinK">A note from Pace</span>
-      <p class="checkin__text" id="checkinText"></p>
-    </aside>
-
     <section class="today">
       <div class="today__head">
         <span class="label">Today&rsquo;s expenses</span>

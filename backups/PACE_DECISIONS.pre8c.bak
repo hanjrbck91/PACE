@@ -5,7 +5,6 @@
 ## Product
 - **D1. Pace is a dynamic spending trajectory, not a fixed daily budget.** Spending today changes the future pace; underspending raises it, overspending lowers it. *Why:* a fixed allowance failed under real unexpected expenses.
 - **D2. Show consequences, don't prescribe.** One understandable daily signal, useful at the moment of spending. The user stays in control.
-- **D2a. Check-ins are state notes, not engagement (Step 8C):** at most one "A note from Pace" on Today, derived from the server state already shown (no second calculation, no thresholds of its own, nothing stored); only when the state says something the screen doesn't (last day of the period; a commitment paid today). No streaks, badges, reminders, praise, urgency or notifications; a new kind needs a product rule behind it.
 - **D3. Not a budgeting/accounting dashboard.** No categories, charts, dashboard widgets or feature expansion "because it's possible"; observe real usage first.
 - **D4. The savings target is protected** and owned by the user; nothing auto-raises, lowers or reinterprets it.
 
@@ -44,7 +43,7 @@
 - **D26. Today is Pace-first** (a full-screen "ledger" layout was tried and rejected): status → Today's Pace → Pace slider → spent/left-or-over today → From tomorrow / Remaining flexible / Days left → Today's expenses (the integrated ledger) → + Log an expense. PROTECTED and "remaining spendable" are not shown on Today.
 - **D27. Pace slider = today's spending vs today's pace only** (notch = today's pace, presentation only, `aria-hidden`). Labels "₹X spent today" and "₹Y left today" / "₹Y over today"; remaining flexible is a separate period-level row.
 - **D28. Status words:** ON PACE, BELOW MINIMUM, BEHIND, plus today-level OVER PACE (V2 on pace but today's spending exceeded today's pace). BEHIND wins. The "YOU SPENT A LOT TODAY." stamp uses the existing large-expense rule (> 5× today's pace or > 25 % of positive flexible money) and may accompany BEHIND or OVER PACE.
-- **D29. Greeting:** "Good morning/afternoon/evening, <display_name>." from device time (00–11:59 / 12–17:59 / 18–23:59); none for Guest or empty name. `display_name` is edited in Settings → Profile → Edit name (Step 8B, local; the dedicated identity surface); the Money Plan "Your name" field still exists and saves the same value.
+- **D29. Greeting:** "Good morning/afternoon/evening, <display_name>." from device time (00–11:59 / 12–17:59 / 18–23:59); none for Guest or empty name. `display_name` is edited in Money Plan.
 - **D30. Large-expense confirmation is a sanity check, never a limit.**
 - **D30a. Honest waiting (Step 8A):** waiting is shown explicitly (never a blank page, no fake progress); a write is only called failed when the server said so — if the outcome is unknown the app checks the server (read-only) and reports the result; the client never re-sends a write beyond the single `client_id`-deduplicated retry.
 

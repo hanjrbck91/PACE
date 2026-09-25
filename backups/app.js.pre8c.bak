@@ -722,31 +722,6 @@
     return false;
   }
 
-  // ---- Step 8C: contextual check-ins ("A note from Pace") ----
-  // Derived ONLY from what the server already returned (state.v2 + plan.commitments): no second Pace engine, no
-  // thresholds of its own, nothing stored. Same state => same note (stable across reloads); it disappears when the
-  // state that caused it is gone. At most one note. No note while Pace is not ready (PERIOD ENDED, CHECK YOUR DATE,
-  // POSITION NEEDED take precedence). Deliberately NOT here: behind (the BEHIND line already says it), "ahead" (no
-  // product rule says what "significantly" means), large expense (the stamp already uses the rule; the state does
-  // not know which expense or the Pace before it), "N days left" (the Days left row already shows it).
-  function checkinFor(v, plan, today) {
-    if (!v || !v.ready) return null;
-    // 1. Last day of the Pace period: the engine has no "from tomorrow" figure (days_remaining_after_today = 0).
-    if (Number(v.days_remaining_after_today) === 0) {
-      return { kind: "last_day", text: v.period_end_source === "configured"
-        ? "Today is the last day of this Pace period. From tomorrow, Pace needs a new end date to continue."
-        : "Today is the last day of this month’s Pace period. From tomorrow, Pace continues to the end of next month." };
-    }
-    // 2. Commitment(s) marked paid today (paid_at = the device-local day the user marked it): no longer protected.
-    var paid = ((plan && plan.commitments) || []).filter(function (c) { return c && c.status === "paid" && c.paid_at === today; });
-    if (paid.length) {
-      var one = function (c) { return c.name + " (" + money(c.amount) + ")"; };
-      var who = paid.length === 1 ? one(paid[0]) + " was" : paid.length === 2 ? one(paid[0]) + " and " + one(paid[1]) + " were" : paid.length + " commitments were";
-      return { kind: "commitment_paid", text: who + " marked paid today, so " + (paid.length === 1 ? "it is" : "they are") + " no longer set aside in your Pace." };
-    }
-    return null;
-  }
-
   function render(opts) {
     var s = store.state;
     if (!s) return;
@@ -760,9 +735,6 @@
       ? "Pace until " + shortDate(v.period_end) : "day " + m.day_of_month + " of " + m.days_in_month);
     var g = greetingText(), ge = $("greet");
     ge.textContent = g; ge.hidden = !g;
-    var ci = checkinFor(v, store.plan, localDayKey()), ciEl = $("checkin");   // Step 8C: secondary context, text only
-    ciEl.hidden = !ci; $("checkinText").textContent = ci ? ci.text : "";
-    if (ci) ciEl.setAttribute("data-kind", ci.kind); else ciEl.removeAttribute("data-kind");
 
     if (!v) {                                   // a pre-V2 cached state: wait for the server instead of showing old numbers
       app.setAttribute("data-state", "boot");

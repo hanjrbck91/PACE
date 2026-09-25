@@ -792,7 +792,3 @@ body {
 .rows > div.profile { display: block; }                     /* the Profile block holds its own row + actions */
 .rows > div.profile > div:first-child { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 44px; }
 .profile .profile__edit { margin-top: 4px; }
-
-/* ---- Step 8C: contextual check-in — a quiet handwritten note between the meta rows and today's expenses ---- */
-.checkin { margin-top: 6px; padding: 6px 0 4px; border-top: 1px dashed var(--rule); }
-.checkin__text { margin: 2px 0 0; font-family: var(--serif); font-style: italic; font-size: 16px; line-height: var(--lh); color: var(--ink); overflow-wrap: anywhere; }

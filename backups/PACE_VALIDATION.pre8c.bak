@@ -4,20 +4,18 @@
 
 ## Current build
 - Backend `apps-script/Code.gs` — LF-normalized SHA-256 prefix `76283fe6bd9a6ce2` (**local Step 8B, NOT deployed**). Production Apps Script **v14** = prefix `a4bba9a032051663` (`backups/Code.gs.pre8b.bak`). Production Apps Script **v13** = prefix `1e11c25d0bb738ff` (`backups/Code.gs.pre71.bak`).
-- Frontend `frontend/*` = **local Steps 8A + 8B + 8C, NOT deployed** (`app.js`, `styles.css`, `index.html` changed; `config.js` unchanged). Production Netlify **`6ab4fa3acba9766b6679413b`** = the pre-8A frontend (`backups/*.pre8a.bak`). Step 8C changed no backend code (Code.gs still `76283fe6bd9a6ce2`).
+- Frontend `frontend/*` = production Netlify **`6ab4fa3acba9766b6679413b`** (served `app.js`, `styles.css`, `config.js` byte-identical; `index.html` differs only by Netlify's injected comment; `config.js` unchanged).
 
 ## Automated tests
 | Suite | Result | Date |
 |---|---|---|
-| `node tests/backend_sim.js` | **469 passed / 0 failed** (446 + 15 Step 8B N-1…N-15 + 8 Step 8C C-1…C-8 state-contract checks) | 2026-09-25 |
+| `node tests/backend_sim.js` | **461 passed / 0 failed** (446 + 15 Step 8B N-1…N-15) | 2026-09-25 |
 | `node tests/frontend_dates.js` | **13 passed / 0 failed** | 2026-09-25 |
 | `node tests/frontend_reliability.js` (Step 8A: greeting boundaries, reply classification, retry/duplicate safety) | **25 passed / 0 failed** | 2026-09-25 |
-| `tests/browser_reliability.js` (Step 8A, local dev backend with fetch fault injection) | **17/17** (re-run after 8C) | 2026-09-25 |
+| `tests/browser_reliability.js` (Step 8A, local dev backend with fetch fault injection) | **17/17** (re-run after 8B) | 2026-09-25 |
 | `node tests/frontend_profile.js` (Step 8B: greeting with named/empty/Unicode/Guest, name rules, profile_only payload) | **13 passed / 0 failed** | 2026-09-25 |
-| `tests/browser_profile.js` (Step 8B, local dev backend) | **21/21** (view, edit/cancel, save + greeting, reload persistence, empty, Unicode, invalid, lost reply, undelivered, Guest, 6 widths) — re-run after 8C | 2026-09-25 |
-| `node tests/frontend_checkins.js` (Step 8C: `checkinFor` — none / last day / paid today / precedence / purity; large-expense rule, optimistic mirror and 8A/8B helpers byte-identical to pre-8C) | **24 passed / 0 failed** | 2026-09-25 |
-| `tests/browser_checkins.js` (Step 8C, local dev backend) | **C1–C21 all pass** (none, paid today, reloads, next day, last day + precedence, PERIOD ENDED, restore, large expense, Guest + Reset, private isolation, 6 widths) | 2026-09-25 |
-| `tests/browser_pace_period.js` (local dev backend, browser pane) | **34/34** (32 scenario checks + 2 private-isolation checks) + layout 18/18 (6 widths: 360/375/390/412/430/1000) — re-run after 8C on a fresh dev backend | 2026-09-25 |
+| `tests/browser_profile.js` (Step 8B, local dev backend) | **21/21** (view, edit/cancel, save + greeting, reload persistence, empty, Unicode, invalid, lost reply, undelivered, Guest, 6 widths) | 2026-09-25 |
+| `tests/browser_pace_period.js` (local dev backend, browser pane) | **34/34 scenario checks** + layout 18/18 (6 widths) + 2 private-isolation checks | 2026-09-24 |
 | `tests/dev_runtime.js` (DEV web app) | 35/35 historically — DEV runs old v9 code, **does not cover V2** | 2026-09-20 |
 
 `backend_sim.js` blocks: migration/auth/isolation, code-only sign-in, Money Plan, V2 Step 1 data model, Step 1.5 commitments, Step 2 engine, Step 3 onboarding/position, Step 4 state exposure, Step 5 (S5-1…21 balance edits), Step 5.5 (R1…R21 balance snapshot + paid/unpaid), Step 7.1 (P-A…P-S engine period tests + P-API1…13 storage/validation), Step 7.2 (Q-1…Q-9: period states, balance-after-end, onboarding with an end date, Guest edit + reset), legacy-tabs-untouched. 11 older Guest tests were rewritten for the approved Guest-parity change (Guest may edit its demo; private tabs untouched; Reset restores). Mutation check: removing the new Reset clean-up makes 6 tests fail. A mutation check (forcing the month-end horizon back) makes 17 Step 7.1 tests fail, so they bite.
@@ -35,17 +33,6 @@
 - End tomorrow ⇒ today 3000 / tomorrow 6000; end today ⇒ D = 1, tomorrow null; end == anchor == today ⇒ one-day period.
 - Leap: 2028-02-28 → 03-01 = 3 days; year boundary Dec 31 → Jan 2 = 3 days.
 - Invalid (before anchor / corrupt) ⇒ `invalid_period`; passed ⇒ `period_ended`; saves with a past end, bad date, or a balance dated after the end are rejected with nothing written.
-
-## Step 8C Contextual Check-ins (LOCAL only, 2026-09-25)
-- Frontend only: `checkinFor(state.v2, plan, localDayKey())` → at most one "A note from Pace" on Today, between the meta rows and Today's expenses. Two kinds: **last_day** (`v.ready` and `days_remaining_after_today === 0`) and **commitment_paid** (a commitment with `status:'paid'` and `paid_at` = today). Not ready (PERIOD ENDED / CHECK YOUR DATE / POSITION NEEDED) ⇒ no note. Nothing stored; nothing written.
-- Baseline before 8C (same harness): backend 461/0, dates 13/0, reliability 25/0, profile 13/0; browser Pace Period 34/34, reliability 17/17, profile 21/21, layout 18/18.
-- Unit 24/0, incl. mutation check: dropping the not-ready guard fails 4, matching any paid date fails 5, a "≤ 3 days" threshold fails 4.
-- Backend sim C-1…C-8 (no Code.gs change): last-day fields (configured + month-end), marking paid records `paid_at` = client day and changes Pace only through the engine (flexible +amount; balance, anchor, transactions untouched), an unrelated later save keeps the original `paid_at`, period ended ⇒ not ready, repeated reads write nothing, Guest paid → Reset demo restores the clean demo, private tabs untouched.
-- Browser (dev backend): C1 no note on an ordinary day; C2 note slot after status / Today's pace / meta rows, before Today's expenses; C3–C7 paid today → note names the commitment + amount, factual copy, on-screen Pace = server Pace, transactions/balance untouched; C8–C10 two reloads → same single note, nothing written, no new localStorage keys; C11 next day (clock +1) → note gone; C12–C13 end = today → last-day note, "From tomorrow —", wins over the paid note; C14 next day → PERIOD ENDED with no note; C15 unpaid + month-end → note gone; C16–C17 large expense → existing confirmation + stamp unchanged, no extra note; C18–C19 Guest same note, Reset demo clears it; C21 dev MUHAMMED/FRIEND byte-identical across Guest activity; C20 layout with the note visible at 375/390/412/430/1000 (Guest) and 360 (private): no overflow, text wraps, below the Pace hierarchy, height 98–132 px. POSITION NEEDED also showed no note.
-- Regression after 8C: backend 469/0, dates 13/0, reliability 25/0, profile 13/0; browser reliability 17/17, profile 21/21, Pace Period 34/34, layout 18/18.
-- **8A–8C batch checkpoint (2026-09-25, fresh dev backend, one ordered pass, no reruns needed):** backend 469/0, dates 13/0, reliability 25/0, profile 13/0, check-ins 24/0; browser Pace Period 34/34 (32 + 2 isolation), reliability 17/17, profile 21/21, layout 18/18 (360/375/390/412/430/1000; Today + profile editor also clean at all 6), check-ins C1–C21 all pass (C20 with the note visible at 375/390/412/430/1000). No new overflow from 8A–8C at 375–1000.
-- Test-harness notes: (1) one `existing` C3 failure ("Pace changed with the longer period") happened when it ran right after the 8C large-expense scenario had made the dev profile BEHIND (today's pace 0 for any period); on a fresh dev backend in baseline order it passed 9/9. (2) A test-shifted clock can leave a dev balance dated in the future ⇒ POSITION NEEDED; re-set the balance before the next scenario. (3) Fast local reads need the injected 3 s / 11 s delay for R1–R3 (as in 8A).
-- Pre-existing, unrelated to 8C (found while testing): the Guest masthead ("DEMO" tag + nav) overflows by 16 px at 360 px; the nav overflows by 5 px at 320 px on any profile. Widths 375–1000 are clean.
 
 ## Step 8B Profile & Identity (LOCAL only, 2026-09-25)
 - Backend: `saveMoneyPlan {profile_only:true, display_name}` → `saveProfile_` writes only the display_name cell; Guest refused; same validation as before. Sim N-1…N-15: only that cell changes, Pace/state unchanged, Unicode, empty, invalid rejected (nothing written), missing row created, isolation (other private tabs, Muhammed, Guest), spoofed identifiers ignored, no GET/unauth writes, idempotent, numeric-looking name kept as text, old full-save path unchanged. Mutation check: removing the Guest guard fails N-10.
@@ -90,8 +77,7 @@ Not verified in browser: afternoon/evening greeting boundaries, screen-reader pa
 - Observation: production Guest sign-in twice hit the app's 15 s timeout ("Server timed out") before succeeding on retry — Apps Script latency spikes (known, see Architecture/limitations), not a code defect.
 
 ## Known untested / weak areas
-- Steps 8A/8B/8C are verified only locally (simulation + dev backend + injected faults), not in production (not deployed).
-- Nav/masthead overflow below 375 px (Guest at 360 px, all profiles at 320 px) — pre-existing, not fixed.
+- Steps 8A/8B are verified only locally (simulation + dev backend + injected faults), not in production (not deployed).
 - Pace Period not exercised on a private production profile (Guest only). Native date-picker appearance differs per browser (functional behaviour checked in Chromium only).
 - Money Plan editor on a private production profile (verified only with the identical bundle on DEV).
 - Real DEV web-app runtime for V2 (only simulated).

@@ -3,20 +3,22 @@
 > Direction, not commitments. Nothing here is approved for implementation until the owner says so for a specific task. Check `PACE_DECISIONS.md` for conflicts first.
 
 ## NOW
-- **Batched local milestones (each COMPLETE LOCALLY) awaiting review/approval for ONE combined deployment (backend first):** Step 8A (stabilization: loading state, honest unknown-outcome writes, 30 s timeout) + Step 8B (Profile & Identity, needs the new backend) + Step 8C (Contextual Check-ins, frontend only). No deployment without explicit approval.
+- **Batched local milestones awaiting review/approval:** Step 8A (stabilization) + Step 8B (Profile & Identity, needs the new backend). No deployment without explicit approval.
+- **Step 8A stabilization** (local build ready: explicit loading state, honest unknown-outcome handling for writes, 30 s timeout) — awaiting owner review; frontend-only deploy needs explicit approval.
 - **Observe real-user behavior and collect feedback** (V2 + Pace Period live).
 
 ## NEXT (candidates, need an explicit product decision)
 - **Profile / multi-user improvements** (adding users beyond MUHAMMED/FRIEND; today provisioned by hand in `USERS`).
 - **Greeting** refinements.
+- **Contextual check-ins.**
 - **Review** (looking back at a period).
 - **Help / explainability** ("What is Pace?", contextual help).
 - Small fix noted in Step 7: Guest reset writing `current_balance_date` as text (backend). (The false "Not recorded" issue is addressed by Step 8A, local.)
 
 ## LATER
 - Additional users (beyond MUHAMMED/FRIEND; today users are provisioned by hand in `USERS`).
-- Profile management beyond the Settings → Profile name editor (Step 8B).
-- Further check-in kinds only with a product rule behind them (e.g. what counts as "significantly ahead"); never engagement messages (D2a).
+- Profile page / name management beyond the Money Plan "Your name" field.
+- Contextual check-ins.
 - Pace Review (looking back at a period).
 - Historical Pace visualization (must respect D3 — no dashboard drift).
 - UI to set `minimum_daily_spend` (engine already supports it).
@@ -31,7 +33,6 @@
 - Manual timezone, Undo stack, date editing, real OAuth/DB backend — only if the user base outgrows the MVP.
 
 ## Done (for orientation)
-Contextual check-ins — last day of the Pace period + commitment paid today (Step 8C, local).
 Name editing in Settings (Step 8B, local).
 Pace Period (7.1 foundation + 7.2 user-facing) and Guest parity — live in production since 2026-09-24 (Step 7).
 Time-based greeting and editable `display_name` shipped in Step 5.8 (now in production).

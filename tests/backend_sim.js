@@ -1083,6 +1083,34 @@ function main() {
   ok('N-14. a name that looks numeric is kept as a name (stored as text)', (() => { const r = prof8(TA8, 'Agent 007'); return r.ok && st3(TA8, T8).plan.display_name === 'Agent 007'; })());
   ok('N-15. full Money Plan save still carries display_name as before (existing path unchanged)', (() => { const pl = st3(TA8, T8).plan; const r = call(env, { action: 'saveMoneyPlan', token: TA8, today: T8, plan: { income: pl.income, savings: pl.savings, commitments: pl.commitments.map(c => ({ id: c.id, name: c.name, amount: c.amount })), display_name: 'Asha' } }); return r.ok && r.data.plan.display_name === 'Asha'; })());
 
+  console.log('\n== Step 8C: state contract used by contextual check-ins (no backend change) ==');
+  const T8C = '2026-09-25';
+  const setC = (end) => [['key', 'value'], ['monthly_income', 50000], ['monthly_savings_target', 5000], ['fixed_monthly_expenses', 1000], ['commitments', JSON.stringify([{ name: 'Rent', amount: 1000 }])], ['current_balance', 9000], ['current_balance_date', '2026-09-20']].concat(end ? [['pace_period_end', end]] : []);
+  const TC1 = mkUser(44, 'NEWC1', setC(T8C), [['Date', 'Amount', 'Note', 'Type', 'ID'], ['2026-09-21', 40, 'tea', 'expense', 'c8-1']]);
+  const k8c1 = st3(TC1, T8C).state.v2;
+  ok('C-1. last day of a configured period: ready, days_remaining_after_today 0, tomorrow_pace null, source configured', k8c1.ready && k8c1.days_remaining_after_today === 0 && k8c1.tomorrow_pace === null && k8c1.period_end_source === 'configured');
+  const TC2 = mkUser(45, 'NEWC2', setC(null));
+  const k8c2 = st3(TC2, '2026-09-30').state.v2, k8c2b = st3(TC2, '2026-09-29').state.v2;
+  ok('C-2. month-end default: last day -> after_today 0 / month_end; the day before -> after_today 1 (no other boundary)', k8c2.ready && k8c2.days_remaining_after_today === 0 && k8c2.period_end_source === 'month_end' && k8c2b.days_remaining_after_today === 1 && k8c2b.tomorrow_pace !== null);
+  const k8pl2 = st3(TC2, T8C).plan, k8tx2 = rowsOf('TX_NEWC2'), k8s2 = st3(TC2, T8C).state.v2;
+  const paidSave = call(env, { action: 'saveMoneyPlan', token: TC2, today: T8C, plan: { income: k8pl2.income, savings: k8pl2.savings, commitments: k8pl2.commitments.map(c => ({ id: c.id, name: c.name, amount: c.amount, status: 'paid' })) } });
+  const k8cm = paidSave.ok && paidSave.data.plan.commitments[0];
+  ok('C-3. marking a commitment paid records paid_at = the client day and exposes it in plan.commitments', k8cm && k8cm.status === 'paid' && k8cm.paid_at === T8C && st3(TC2, T8C).plan.commitments[0].paid_at === T8C, J2(paidSave.error));
+  ok('C-4. paying changes protected money only through the existing engine (flexible +1000); balance, anchor, transactions untouched', paidSave.data.state.v2.remaining_flexible === k8s2.remaining_flexible + 1000 && paidSave.data.plan.current_balance === 9000 && paidSave.data.plan.current_balance_date === '2026-09-20' && rowsOf('TX_NEWC2') === k8tx2);
+  const k8later = call(env, { action: 'saveMoneyPlan', token: TC2, today: '2026-09-26', plan: { income: 51000, savings: k8pl2.savings, commitments: st3(TC2, '2026-09-26').plan.commitments.map(c => ({ id: c.id, name: c.name, amount: c.amount })) } });
+  ok('C-5. an unrelated plan save the next day keeps the original paid_at (the note never re-appears by itself)', k8later.ok && k8later.data.plan.commitments[0].paid_at === T8C);
+  const TC3 = mkUser(46, 'NEWC3', setC('2026-09-22'));
+  const k8c3 = st3(TC3, T8C).state.v2;
+  ok('C-6. period ended -> ready false, reason period_ended (the PERIOD ENDED state wins; no note)', k8c3.ready === false && k8c3.reason === 'period_ended');
+  const beforeReads = [rowsOf('SET_NEWC1'), rowsOf('TX_NEWC1')];
+  for (let i = 0; i < 3; i++) st3(TC1, T8C);
+  ok('C-7. repeated reads (reloads) write nothing: settings + transactions byte-identical (no check-in persistence)', rowsOf('SET_NEWC1') === beforeReads[0] && rowsOf('TX_NEWC1') === beforeReads[1]);
+  call(env, { action: 'resetGuest', token: TG, today: T8C });
+  const k8gpl = st3(TG, T8C).plan, gClean = rowsOf('SET_GUEST'), privC = J2([ss.getSheetByName('SET_MUH').rows, ss.getSheetByName('TX_MUH').rows, rowsOf('SET_NEWC2')]);
+  const gPaid = call(env, { action: 'saveMoneyPlan', token: TG, today: T8C, plan: { income: k8gpl.income, savings: k8gpl.savings, commitments: k8gpl.commitments.map(c => ({ id: c.id, name: c.name, amount: c.amount, status: 'paid' })) } });
+  call(env, { action: 'resetGuest', token: TG, today: T8C });
+  ok('C-8. Guest: marking the demo commitment paid gets paid_at today; Reset demo restores it unpaid (clean demo); private tabs untouched', gPaid.ok && gPaid.data.plan.commitments.every(c => c.paid_at === T8C) && rowsOf('SET_GUEST') === gClean && st3(TG, T8C).plan.commitments.every(c => c.status === 'unpaid' && c.paid_at === null) && J2([ss.getSheetByName('SET_MUH').rows, ss.getSheetByName('TX_MUH').rows, rowsOf('SET_NEWC2')]) === privC, J2(gPaid.error));
+
   console.log('\n== Legacy tabs untouched at the end ==');
   ok('legacy Transactions/Settings byte-identical to start', legacyBefore === JSON.stringify(ss.getSheetByName('Transactions').rows) + JSON.stringify(ss.getSheetByName('Settings').rows));
 

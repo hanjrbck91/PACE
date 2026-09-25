@@ -2,11 +2,6 @@
 
 > Historical record, newest first. Concise. Not required reading; open the relevant entry only. Apps Script versions = web-app deployment versions; Netlify IDs = deploy IDs.
 
-## 2026-09-25 — Step 8C: Contextual Check-ins (local, NOT deployed)
-- Today can show one quiet "A note from Pace" between the meta rows and Today's expenses, derived only from the server state already returned (`checkinFor(state.v2, plan, localDayKey())`): **last day of the Pace period** (`days_remaining_after_today = 0`; wording differs for a configured end vs the month-end default) and **commitment marked paid today** (`paid_at` = today; names ≤ 2 commitments with amounts, else a count). Last day wins; none while Pace is not ready (PERIOD ENDED etc.).
-- Deliberately not built: behind/ahead (BEHIND / OVER PACE lines already exist; no product rule defines "significantly ahead"), large expense (the stamp already uses the rule; the state doesn't know which expense), "N days left" (Days left row). No persistence, no backend change, no schema change, no notifications.
-- Tests: +24 `frontend_checkins.js`, +8 sim (C-1…C-8, backend contract), `browser_checkins.js` C1–C21; all existing suites re-run green.
-
 ## 2026-09-25 — Step 8B: Profile & Identity (local, NOT deployed)
 - Settings → Profile: Name + Edit name (input / Save / Cancel) for private profiles; Guest unchanged ("Guest (demo)", no editor).
 - Backend: `saveMoneyPlan {profile_only:true, display_name}` → new `saveProfile_` (writes only display_name; Guest refused; existing validation). Additive; no schema/auth/finance change. Chosen over re-sending the whole plan so a name change can never overwrite a newer plan from another device.
