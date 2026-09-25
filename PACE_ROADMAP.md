@@ -1,0 +1,37 @@
+# Pace — Roadmap
+
+> Direction, not commitments. Nothing here is approved for implementation until the owner says so for a specific task. Check `PACE_DECISIONS.md` for conflicts first.
+
+## NOW
+- **Step 8A stabilization** (local build ready: explicit loading state, honest unknown-outcome handling for writes, 30 s timeout) — awaiting owner review; frontend-only deploy needs explicit approval.
+- **Observe real-user behavior and collect feedback** (V2 + Pace Period live).
+
+## NEXT (candidates, need an explicit product decision)
+- **Profile / multi-user improvements** (adding users beyond MUHAMMED/FRIEND; today provisioned by hand in `USERS`).
+- **Name editing** beyond the Money Plan "Your name" field.
+- **Greeting** refinements.
+- **Contextual check-ins.**
+- **Review** (looking back at a period).
+- **Help / explainability** ("What is Pace?", contextual help).
+- Small fix noted in Step 7: Guest reset writing `current_balance_date` as text (backend). (The false "Not recorded" issue is addressed by Step 8A, local.)
+
+## LATER
+- Additional users (beyond MUHAMMED/FRIEND; today users are provisioned by hand in `USERS`).
+- Profile page / name management beyond the Money Plan "Your name" field.
+- Contextual check-ins.
+- Pace Review (looking back at a period).
+- Historical Pace visualization (must respect D3 — no dashboard drift).
+- UI to set `minimum_daily_spend` (engine already supports it).
+- Backend-synced currency choice.
+
+## IDEAS / UNDECIDED (parked)
+- Savings recovery over later months (never auto-raise the target).
+- Emergency fund.
+- PWA (manifest, service worker).
+- Per-transaction timestamps (would refine the balance snapshot).
+- Transaction/commitment matching (UPI/bank) — only through a separate matching layer that flips commitment status.
+- Manual timezone, Undo stack, date editing, real OAuth/DB backend — only if the user base outgrows the MVP.
+
+## Done (for orientation)
+Pace Period (7.1 foundation + 7.2 user-facing) and Guest parity — live in production since 2026-09-24 (Step 7).
+Time-based greeting and editable `display_name` shipped in Step 5.8 (now in production).

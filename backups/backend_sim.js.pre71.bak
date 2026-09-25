@@ -397,9 +397,9 @@ function main() {
 
   // guest
   const gset = JSON.stringify(ss.getSheetByName('SET_GUEST').rows);
-  ok('G1. (7.2) guest edits only its own demo plan; private tabs untouched; Reset demo restores the demo exactly', (() => { const pv = JSON.stringify([ss.getSheetByName('SET_MUH').rows, ss.getSheetByName('SET_FRIEND').rows, ss.getSheetByName('TX_MUH').rows, ss.getSheetByName('TX_FRIEND').rows]); const r = plan(TG, PLAN); const changed = JSON.stringify(ss.getSheetByName('SET_GUEST').rows) !== gset; const rs = call(env, { action: 'resetGuest', token: TG, today: TODAY }); return r.ok && changed && JSON.stringify([ss.getSheetByName('SET_MUH').rows, ss.getSheetByName('SET_FRIEND').rows, ss.getSheetByName('TX_MUH').rows, ss.getSheetByName('TX_FRIEND').rows]) === pv && rs.ok && call(env, { action: 'all', token: TG, today: TODAY }).data.plan.income === 45000; })());
+  ok('G1. guest cannot change the shared demo plan', !plan(TG, PLAN).ok && JSON.stringify(ss.getSheetByName('SET_GUEST').rows) === gset);
   const gp = call(env, { action: 'all', token: TG, today: TODAY }).data.plan;
-  ok('G2. guest demo plan (income 45,000 / savings 10,000 / fixed 16,500) after reset; editable (7.2)', gp.income === 45000 && gp.savings === 10000 && gp.fixed === 16500 && gp.editable === true && gp.needs_setup === false);
+  ok('G2. guest keeps its demo plan (income 45,000 / savings 10,000 / fixed 16,500), not editable', gp.income === 45000 && gp.savings === 10000 && gp.fixed === 16500 && gp.editable === false && gp.needs_setup === false);
   const gr = call(env, { action: 'resetGuest', token: TG, today: TODAY });
   ok('G3. resetGuest restores demo settings and returns the plan', gr.ok && gr.data.plan.income === 45000 && gr.data.plan.needs_setup === false);
 
@@ -440,7 +440,7 @@ function main() {
   const pl0 = allOf(TM).data.plan, pf0 = allOf(TF).data.plan, pg0 = allOf(TG).data.plan;
   ok('V13a. Muhammed (valid plan, no balance) -> needs_position, needs_setup false, no invented balance', pl0.setup_state === 'needs_position' && pl0.needs_setup === false && pl0.current_balance === null && pl0.current_balance_date === null);
   ok('V14a. Friend -> needs_position, needs_setup false', pf0.setup_state === 'needs_position' && pf0.needs_setup === false && pf0.current_balance === null);
-  ok('V15a. Guest -> complete (demo), editable demo (7.2)', pg0.setup_state === 'complete' && pg0.editable === true);
+  ok('V15a. Guest -> complete (demo), not editable', pg0.setup_state === 'complete' && pg0.editable === false);
   ok('V27. all response keeps every previous key (user, settings, plan.*, transactions, state)', (() => { const d = allOf(TM).data; return ['user', 'settings', 'plan', 'transactions', 'state'].every(k => k in d) && ['needs_setup', 'editable', 'income', 'savings', 'fixed', 'commitments', 'available'].every(k => k in d.plan); })());
 
   // invalid inputs (nothing written)
@@ -513,7 +513,7 @@ function main() {
 
   // guest + isolation
   const gRows = J2(ss.getSheetByName('SET_GUEST').rows);
-  ok('V16a. (7.2) Guest can save V2 fields to its own tab only; Reset demo restores the demo rows', (() => { const pv = J2([ss.getSheetByName('SET_MUH').rows, ss.getSheetByName('SET_FRIEND').rows, ss.getSheetByName('TX_MUH').rows, ss.getSheetByName('TX_FRIEND').rows]); const r = plan(TG, Object.assign({}, BASE, { current_balance: 1, display_name: 'x' })); call(env, { action: 'resetGuest', token: TG }); return r.ok && r.data.plan.current_balance === 1 && J2([ss.getSheetByName('SET_MUH').rows, ss.getSheetByName('SET_FRIEND').rows, ss.getSheetByName('TX_MUH').rows, ss.getSheetByName('TX_FRIEND').rows]) === pv && J2(ss.getSheetByName('SET_GUEST').rows) === gRows; })());
+  ok('V16a. Guest cannot save V2 fields', !plan(TG, Object.assign({}, BASE, { current_balance: 1, display_name: 'x' })).ok && J2(ss.getSheetByName('SET_GUEST').rows) === gRows);
   ok('V15b. Guest login/session/demo still work', (() => { const g2 = call(env, { action: 'guest' }); return g2.ok && allOf(g2.data.token).data.plan.income === 45000; })());
   const gr2 = call(env, { action: 'resetGuest', token: TG, today: TODAY });
   ok('V15c. resetGuest restores demo incl. explicit demo V2 values (Guest, 45000)', gr2.ok && gr2.data.plan.display_name === 'Guest' && gr2.data.plan.current_balance === 45000 && gr2.data.plan.setup_state === 'complete');
@@ -641,7 +641,7 @@ function main() {
 
   // guest
   const gc1 = allOf(TG).data.plan.commitments.map(c => c.id), gRows15 = J2(ss.getSheetByName('SET_GUEST').rows);
-  ok('C27a. (7.2) Guest can mark its own demo commitment paid; Reset demo restores the demo commitments', (() => { const r = plan(TG, { income: 45000, savings: 10000, commitments: [{ id: gc1[0], name: 'x', amount: 1, status: 'paid' }] }); call(env, { action: 'resetGuest', token: TG }); return r.ok && r.data.plan.commitments[0].status === 'paid' && J2(ss.getSheetByName('SET_GUEST').rows) === gRows15 && J2(allOf(TG).data.plan.commitments.map(c => c.id)) === J2(gc1); })());
+  ok('C27a. Guest still works and cannot mutate commitments', !plan(TG, { income: 45000, savings: 10000, commitments: [{ id: gc1[0], name: 'x', amount: 1, status: 'paid' }] }).ok && J2(ss.getSheetByName('SET_GUEST').rows) === gRows15);
   const gr15a = call(env, { action: 'resetGuest', token: TG, today: TODAY }), gr15b = call(env, { action: 'resetGuest', token: TG, today: TODAY });
   ok('C28. Guest reset restores a deterministic commitment state (same ids, unpaid, both resets)', gr15a.ok && J2(gr15a.data.plan.commitments) === J2(gr15b.data.plan.commitments) && gr15a.data.plan.commitments.map(c => c.id).join() === gc1.join() && gr15a.data.plan.commitments.every(c => c.status === 'unpaid'));
   ok('C31. local-day semantics preserved (day from client only)', allOf(TM, '2026-09-10').data.state.month.day_of_month === 10 && P2.data.plan.commitments[1].paid_at === '2026-02-03');
@@ -735,12 +735,12 @@ function main() {
 
   // guest
   const gAll = allOf(TG).data;
-  ok('G-1. Guest demo has a position and a real Pace (ready, on_pace/under), editable demo (7.2)', gAll.state.position_ready === true && gAll.state.today_pace > 0 && gAll.plan.editable === true && gAll.plan.setup_state === 'complete');
+  ok('G-1. Guest demo has a position and a real Pace (ready, on_pace/under), still not editable', gAll.state.position_ready === true && gAll.state.today_pace > 0 && gAll.plan.editable === false && gAll.plan.setup_state === 'complete');
   const gSheet = ss.getSheetByName('SET_GUEST'); gSheet.rows = gSheet.rows.filter(r => !['display_name', 'current_balance', 'current_balance_date'].includes(r[0]));   // prod-like guest tab (no V2 rows yet)
   const gHeal = allOf(TG).data;
   ok('G-2. an old Guest tab without V2 rows self-heals with the explicit demo position (demo only, idempotent)', gHeal.state.position_ready === true && gHeal.plan.current_balance === 45000 && J2(allOf(TG).data.plan) === J2(gHeal.plan));
   ok('G-3. Guest reset restores the same demo Pace every time', (() => { const a = call(env, { action: 'resetGuest', token: TG, today: TODAY }).data.state.v2, b = call(env, { action: 'resetGuest', token: TG, today: TODAY }).data.state.v2; return a.today_pace === b.today_pace && a.ready; })());
-  ok('G-4. Guest position edits land only in the demo, never in private position data (7.2)', (() => { const r = plan(TG, { income: 1, savings: 0, commitments: [], current_balance: 1 }); call(env, { action: 'resetGuest', token: TG, today: TODAY }); return r.ok && snapPriv(TM) === mSnap15; })());
+  ok('G-4. private users cannot touch Guest / Guest cannot touch private position data', !plan(TG, { income: 1, savings: 0, commitments: [], current_balance: 1 }).ok && snapPriv(TM) === mSnap15);
   ok('S2-auth. auth/isolation/no-secrets still intact with the V2 engine', call(env, { action: 'login', code: CODES.MUHAMMED }).data.user === 'MUHAMMED' && !J2([allOf(TE), allOf(TG), E0]).match(/access_credential|SESSION_SECRET|[0-9a-f]{64}/) && allOf(TF).data.user.key === 'FRIEND' && !J2(allOf(TF).data).includes('FOOD'));
   ok('S2-final. legacy state fields keep their shape (frontend compatible): every prior key still present', ['as_of', 'inputs', 'month', 'discretionary_monthly', 'total_spendable', 'initial_daily_pace', 'daily_allowance', 'today_pace', 'spent_today', 'expected_today', 'today_variance', 'remaining_spendable', 'remaining_pace', 'remaining_discretionary', 'safe_daily_for_rest_of_month', 'expected_spend_to_date', 'actual_spend_to_date', 'income_this_month', 'pace', 'status', 'current_balance', 'transaction_count'].every(k => k in allOf(TM).data.state) && allOf(TM).data.state.month.days_remaining_incl_today >= 1);
 
@@ -833,7 +833,7 @@ function main() {
   const otherBefore = rowsOf('SET_NEWK'), mSet3 = J2(ss.getSheetByName('SET_MUH').rows);
   const spoofP = call(env, { action: 'saveMoneyPlan', token: TH3, today: '2026-09-20', user_key: 'NEWK', settings_sheet: 'SET_NEWK', plan: { position_only: true, current_balance: 1, settings_sheet: 'SET_NEWK', user_key: 'NEWK' } });
   ok('S34. cross-user: spoofed identifiers only ever write the caller\'s own tab', spoofP.ok && rowsOf('SET_NEWK') === otherBefore && J2(ss.getSheetByName('SET_MUH').rows) === mSet3);
-  ok('S35/36. Guest stays complete, is never forced into setup, cannot onboard; a demo position edit stays in the demo (7.2) and Reset restores it', (() => { const pv = J2([ss.getSheetByName('SET_MUH').rows, ss.getSheetByName('SET_FRIEND').rows, ss.getSheetByName('TX_MUH').rows, ss.getSheetByName('TX_FRIEND').rows]); const ok1 = st3(TG).plan.setup_state === 'complete' && !ob(TG, {}).ok; const r = pos(TG, { current_balance: 1 }); call(env, { action: 'resetGuest', token: TG }); return ok1 && r.ok && J2([ss.getSheetByName('SET_MUH').rows, ss.getSheetByName('SET_FRIEND').rows, ss.getSheetByName('TX_MUH').rows, ss.getSheetByName('TX_FRIEND').rows]) === pv && st3(TG).state.position_ready === true && st3(TG).plan.current_balance === 45000; })());
+  ok('S35/36. Guest stays complete, is never forced into setup, cannot use either onboarding path', st3(TG).plan.setup_state === 'complete' && !ob(TG, {}).ok && !pos(TG, { current_balance: 1 }).ok && st3(TG).state.position_ready === true);
   ok('S37. a failed save never marks a profile complete (checked for onboarding + position)', st3(TG3).plan.setup_state === 'complete' && (() => { const t = mkUser(26, 'FAIL1'); ob(t, { currency: 'ZZZ' }); return st3(t).plan.setup_state === 'needs_plan'; })());
   ok('S38/39. no access code / hash / secret in any onboarding response', !J2([OG1, OG2, BJ3, PE1, PK1]).match(/access_credential|SESSION_SECRET|[0-9a-f]{64}/) && !J2([OG1, PE1]).includes(NEWCODE));
   ok('S40. no GET can start, read or mutate onboarding', ['saveMoneyPlan', 'all', 'position_only'].every(a => JSON.parse(env.doGet({ parameter: { action: a, token: TH3, current_balance: 1 } }).getContent()).error === 'unauthorized'));
@@ -908,7 +908,7 @@ function main() {
   const TQ5 = mkUser(30, 'NEWQ');
   ok('S5-17. needs_plan user still must onboard: position_only refused, nothing written', (() => { const b = rowsOf('SET_NEWQ'); return !bal5(TQ5, 100).ok && rowsOf('SET_NEWQ') === b && st3(TQ5).plan.setup_state === 'needs_plan'; })());
   ok('S5-18. onboarding creates the balance, visible in the plan afterwards', (() => { const r = call(env, { action: 'saveMoneyPlan', token: TQ5, today: T5, plan: { require_complete: true, display_name: 'Q', currency: 'INR', income: 30000, savings: 3000, current_balance: 9000, commitments: [] } }); return r.ok && r.data.plan.current_balance === 9000 && r.data.plan.current_balance_date === T5 && r.data.plan.setup_state === 'complete'; })());
-  ok('S5-19. (7.2) Guest can edit the demo balance; stays complete; Reset restores 45,000', (() => { const r = bal5(TG, 1); call(env, { action: 'resetGuest', token: TG }); return r.ok && st3(TG).plan.setup_state === 'complete' && st3(TG).plan.current_balance === 45000; })());
+  ok('S5-19. Guest cannot edit balance; stays complete', !bal5(TG, 1).ok && st3(TG).plan.setup_state === 'complete');
   ok('S5-20. cross-user isolation: editing NEWP never touches NEWQ or SET_MUH', (() => { const q = rowsOf('SET_NEWQ'), m = J2(ss.getSheetByName('SET_MUH').rows); bal5(T5A, 4321, '2026-09-30'); return rowsOf('SET_NEWQ') === q && J2(ss.getSheetByName('SET_MUH').rows) === m; })());
   ok('S5-21. no secrets in responses; GET cannot mutate', !J2([B2_5, B3_5, B4_5, P1_5]).match(/access_credential|SESSION_SECRET|[0-9a-f]{64}/) && (() => { const b = rowsOf('SET_NEWP'); env.doGet({ parameter: { action: 'saveMoneyPlan', token: T5A, current_balance: 1 } }); return rowsOf('SET_NEWP') === b; })());
 
@@ -954,107 +954,8 @@ function main() {
   ok('R17. dry-run preview shows the SAME balance/pace that the save then returns (Review == server == returned plan == next read)', (() => { const dry = call(env, { action: 'saveMoneyPlan', token: TS55, today: T55, plan: { position_only: true, current_balance: 12588, dry_run: true } }); const real = call(env, { action: 'saveMoneyPlan', token: TS55, today: T55, plan: { position_only: true, current_balance: 12588 } }); const rd = allOf(TS55, T55).data; return dry.ok && real.ok && dry.data.plan.current_balance === 12588 && real.data.plan.current_balance === 12588 && rd.plan.current_balance === 12588 && dry.data.state.today_pace === real.data.state.today_pace && rd.state.today_pace === real.data.state.today_pace; })());
   ok('R18. legacy anchors without a snapshot list keep the old rule (every expense on/after the date counts) - no migration needed', (() => { const t = mkUser(33, 'NEWT', [['key', 'value'], ['monthly_income', 50000], ['monthly_savings_target', 0], ['fixed_monthly_expenses', 0], ['current_balance', 1000], ['current_balance_date', '2026-09-20']], [['Date', 'Amount', 'Note', 'Type', 'ID'], ['2026-09-20', 100, 'x', 'expense', 't-1']]); const v = st3(t).state.v2; return v.effective_balance === 900 && v.expenses_since_balance === 100; })());
   ok('R19. schema note: transactions still have NO timestamp column (A-E only); the snapshot is stored as one settings row, not a transaction change', /Columns: A Date \| B Amount \| C Note \| D Type \| E ID/.test(CODE) && /current_balance_covered/.test(CODE) && !/created_at/.test(CODE));
-  ok('R20. Guest demo position works without a snapshot list; demo edits allowed (7.2) and reset', st3(TG).plan.setup_state === 'complete' && st3(TG).state.position_ready === true && (() => { const r = call(env, { action: 'saveMoneyPlan', token: TG, today: T55, plan: { position_only: true, current_balance: 1 } }); call(env, { action: 'resetGuest', token: TG }); return r.ok; })());
+  ok('R20. Guest unchanged (demo position, no snapshot list needed) and still cannot edit', st3(TG).plan.setup_state === 'complete' && st3(TG).state.position_ready === true && !call(env, { action: 'saveMoneyPlan', token: TG, today: T55, plan: { position_only: true, current_balance: 1 } }).ok);
   ok('R21. frontend guard present: writes bump a data epoch and a load that started before a write is discarded (no stale overwrite)', (() => { const app = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'app.js'), 'utf8'); return /dataEpoch\+\+/.test(app) && /epoch0 !== dataEpoch/.test(app); })());
-
-  console.log('\n== Step 7.1: configurable Pace Period (end) foundation ==');
-  const pe = o => eng(Object.assign({ position: { balance: 20000, date: '2026-09-10' }, today: '2026-09-10' }, o));
-  const strip71 = r => { const c = Object.assign({}, r); delete c.period_end_source; return J2(c); };
-  // A. legacy: no pace_period_end = calendar month end, numbers identical to a configured month end
-  ok('P-A1. legacy (no periodEnd / null / ""): period_end = month end, source month_end, same numbers as before', ['_', null, ''].every(v => { const r = v === '_' ? eng({}) : eng({ periodEnd: v }); return r.ready && r.period_end === '2026-09-30' && r.period_end_source === 'month_end' && r.today_pace === 600 && r.pace_days === 10; }));
-  ok('P-A2. configured end == month end gives exactly the legacy result (only period_end_source differs)', strip71(eng({ periodEnd: '2026-09-30' })) === strip71(eng({})) && strip71(eng({ today: '2026-09-25', periodEnd: '2026-09-30', transactions: [ex('2026-09-22', 300), ex('2026-09-25', 50)] })) === strip71(eng({ today: '2026-09-25', transactions: [ex('2026-09-22', 300), ex('2026-09-25', 50)] })));
-  ok('P-A3. period_start = the balance anchor date', pe({ periodEnd: '2026-10-05' }).period_start === '2026-09-10' && eng({}).period_start === '2026-09-20');
-  // B. same month Sep 10 -> Sep 30
-  const B71 = pe({ periodEnd: '2026-09-30' });
-  ok('P-B1. same-month period Sep 10..Sep 30 on the anchor day: 21 days incl. today, pace over 20 days after today = 6000/20 = 300', B71.days_remaining_incl_today === 21 && B71.pace_days === 20 && B71.today_pace === 300 && B71.tomorrow_pace === 300, J2(B71));
-  const B72 = pe({ today: '2026-09-15', periodEnd: '2026-09-30' });
-  ok('P-B2. same period, later day (Sep 15): start-of-day flexible / 16 days incl. today', B72.anchor_day === false && B72.days_remaining_incl_today === 16 && B72.today_pace === 375 && B72.tomorrow_pace === 400);
-  // C. cross-month Sep 10 -> Oct 5
-  const C71 = pe({ periodEnd: '2026-10-05' });
-  ok('P-C1. cross-month Sep 10..Oct 5 on the anchor day: 26 days incl. today, pace 6000/25 = 240, period_end Oct 5', C71.days_remaining_incl_today === 26 && C71.pace_days === 25 && C71.today_pace === 240 && C71.period_end === '2026-10-05' && C71.period_end_source === 'configured');
-  const C72 = pe({ today: '2026-09-28', periodEnd: '2026-10-05' });
-  ok('P-C2. Sep 28 inside the cross-month period: 8 days incl. today (28,29,30,1..5), pace 750 (month-end default would say 3 days)', C72.days_remaining_incl_today === 8 && C72.today_pace === 750 && pe({ today: '2026-09-28' }).days_remaining_incl_today === 3);
-  const C73 = pe({ today: '2026-10-03', periodEnd: '2026-10-05', transactions: [ex('2026-09-20', 1000), ex('2026-10-01', 500)] });
-  ok('P-C3. in October, expenses from both months since the anchor count: flexible 4500 / 3 days = 1500', C73.remaining_flexible === 4500 && C73.days_remaining_incl_today === 3 && C73.today_pace === 1500);
-  // D/E/P. ends tomorrow / today / last day
-  const D71 = pe({ today: '2026-09-20', periodEnd: '2026-09-21' });
-  ok('P-D. period ending tomorrow: 2 days incl. today; today 3000, tomorrow 6000', D71.days_remaining_incl_today === 2 && D71.days_remaining_after_today === 1 && D71.today_pace === 3000 && D71.tomorrow_pace === 6000);
-  const E71 = pe({ today: '2026-09-20', periodEnd: '2026-09-20' });
-  ok('P-E/P. last day of the period (ends today): D = 1, whole flexible today, tomorrow null (same as last day of month)', E71.days_remaining_incl_today === 1 && E71.today_pace === 6000 && E71.tomorrow_pace === null && E71.pace_status === 'on_pace');
-  const E72 = pe({ periodEnd: '2026-09-10' });
-  ok('P-E2. end == balance date == today (one-day period on the anchor day): pace over 1 day = 6000, tomorrow null (same as the month-end anchor-day rule)', E72.ready && E72.anchor_day && E72.pace_days === 1 && E72.today_pace === 6000 && E72.tomorrow_pace === null);
-  // F/H. anchor day with covered expenses
-  const tx71 = [{ id: 'c1', date: '2026-09-10', amount: 400, type: 'expense' }, { id: 'c2', date: '2026-09-10', amount: 100, type: 'expense' }];
-  const F71 = pe({ periodEnd: '2026-10-05', position: { balance: 20000, date: '2026-09-10', covered: ['c1'] }, transactions: tx71 });
-  ok('P-F/H. anchor day: covered expense (400) excluded, post-snapshot one (100) counts: (6000-100)/25 = 236', F71.expenses_counted_today === 100 && F71.expenses_today === 500 && F71.remaining_flexible === 5900 && F71.today_pace === 236);
-  // G/I/O. day after anchor
-  const G71 = pe({ today: '2026-09-11', periodEnd: '2026-10-05', transactions: [ex('2026-09-10', 300), ex('2026-09-11', 500)] });
-  ok('P-G/I/O. day after anchor: start-of-day (6000-300)/25 = 228, today\'s 500 moves only tomorrow: 5200/24', G71.anchor_day === false && G71.days_remaining_incl_today === 25 && G71.today_pace === 228 && near(G71.tomorrow_pace, 5200 / 24) && G71.remaining_flexible === 5200);
-  // J. outside the period
-  const J71 = pe({ today: '2026-09-25', periodEnd: '2026-10-05', transactions: [ex('2026-09-09', 999), ex('2026-10-02', 777), ex('2026-09-20', 5000, 'income')] });
-  ok('P-J. before the anchor, future-dated (inside the period but after today) and income: no effect', J71.effective_balance === 20000 && J71.expenses_since_balance === 0);
-  // K/L. commitments + savings unchanged
-  const K71 = pe({ periodEnd: '2026-10-05', commitments: [{ amount: 10000, status: 'paid' }, { amount: 1000, status: 'unpaid' }] });
-  ok('P-K/L. paid commitment not protected, unpaid + savings protected once: protected 5000, flexible 15000/25 = 600', K71.protected_money === 5000 && K71.savings_target === 4000 && K71.remaining_flexible === 15000 && K71.today_pace === 600);
-  // M. behind
-  const M71 = pe({ periodEnd: '2026-10-05', position: { balance: 10000, date: '2026-09-10' }, commitments: [{ amount: 8000, status: 'unpaid' }] });
-  ok('P-M. negative flexible with a configured period: BEHIND, shown pace 0, deficit -2000 exposed, raw -80', M71.pace_status === 'behind' && M71.today_pace === 0 && M71.remaining_flexible === -2000 && near(M71.today_pace_unclamped, -80));
-  // N. minimum daily spend
-  const N71 = pe({ today: '2026-09-21', periodEnd: '2026-10-05', position: { balance: 17000, date: '2026-09-10' }, minimumDailySpend: 400 });
-  ok('P-N. minimum: pace 3000/15 = 200 < 400 -> below_minimum, gap 200, gap_total 200 x 15 = 3000, pace unchanged by the minimum', N71.today_pace === 200 && N71.pace_status === 'below_minimum' && N71.minimum_spend_gap === 200 && N71.minimum_spend_gap_total === 3000 && pe({ today: '2026-09-21', periodEnd: '2026-10-05', position: { balance: 17000, date: '2026-09-10' } }).today_pace === 200);
-  // Q. invalid periods
-  ok('P-Q1. end before the balance date -> no Pace (invalid_period), never a guessed month end', (() => { const r = pe({ periodEnd: '2026-09-09' }); return r.ready === false && r.reason === 'invalid_period' && r.today_pace === undefined; })());
-  ok('P-Q2. corrupt end values (garbage, impossible date, wrong format) -> invalid_period', ['abc', '2026-02-30', '2026/10/05', '2026-10-5'].every(v => { const r = pe({ periodEnd: v }); return r.ready === false && r.reason === 'invalid_period'; }));
-  ok('P-Q3. period already over (end >= anchor but < today) -> no Pace (period_ended), period_end reported', (() => { const r = pe({ today: '2026-10-06', periodEnd: '2026-10-05' }); return r.ready === false && r.reason === 'period_ended' && r.period_end === '2026-10-05' && r.today_pace === undefined; })());
-  ok('P-Q4. missing position still wins over any period data (needs_position)', eng({ position: null, periodEnd: '2026-10-05' }).reason === 'needs_position');
-  // R/S. month / year / leap boundaries (pure calendar maths)
-  ok('P-R. month + year boundaries: Sep 30 -> Oct 1 = 2 days; Dec 31 -> Jan 2 = 3 days; Jan 31 -> Mar 1 (2027) = 30 days', pe({ position: { balance: 20000, date: '2026-09-30' }, today: '2026-09-30', periodEnd: '2026-10-01' }).days_remaining_incl_today === 2 && pe({ position: { balance: 20000, date: '2026-12-31' }, today: '2026-12-31', periodEnd: '2027-01-02' }).days_remaining_incl_today === 3 && pe({ position: { balance: 20000, date: '2027-01-31' }, today: '2027-01-31', periodEnd: '2027-03-01' }).days_remaining_incl_today === 30);
-  ok('P-S. leap years: 2028-02-28 -> 03-01 = 3 days (Feb 29 exists); 2027-02-28 -> 03-01 = 2 days; month-end default in Feb 2028 = 02-29', pe({ position: { balance: 20000, date: '2028-02-28' }, today: '2028-02-28', periodEnd: '2028-03-01' }).days_remaining_incl_today === 3 && pe({ position: { balance: 20000, date: '2027-02-28' }, today: '2027-02-28', periodEnd: '2027-03-01' }).days_remaining_incl_today === 2 && pe({ position: { balance: 20000, date: '2028-02-10' }, today: '2028-02-10' }).period_end === '2028-02-29');
-  ok('P-purity. engine still pure (no Sheets/Cache/Lock/Utilities) and deterministic with a period end', !/SpreadsheetApp|CacheService|LockService|PropertiesService|Utilities\.|UrlFetch|setValue|appendRow/.test(CODE.slice(CODE.indexOf('function calculatePaceV2_'), CODE.indexOf('function applyPaceV2_'))) && J2(C71) === J2(pe({ periodEnd: '2026-10-05' })));
-
-  // ---------- API / storage ----------
-  const T71 = '2026-09-20';
-  const TP71 = mkUser(34, 'NEWT7', [['key', 'value'], ['monthly_income', 50000], ['monthly_savings_target', 4000], ['fixed_monthly_expenses', 10000], ['commitments', JSON.stringify([{ name: 'Rent', amount: 10000 }])], ['starting_balance', 777], ['starting_balance_date', '2026-09-01']],
-    [['Date', 'Amount', 'Note', 'Type', 'ID'], ['2026-09-18', 50, 'old', 'expense', 't71-1']]);
-  const muh71 = J2(ss.getSheetByName('SET_MUH').rows);
-  const P0_71 = pos(TP71, { current_balance: 20000 }, T71);
-  ok('P-API1. legacy profile (no pace_period_end): plan.pace_period_end null, v2 period_end = month end, same Pace as before', P0_71.ok && P0_71.data.plan.pace_period_end === null && P0_71.data.state.v2.period_end === '2026-09-30' && P0_71.data.state.v2.today_pace === 600);
-  const tx71r = rowsOf('TX_NEWT7'), set71 = ss.getSheetByName('SET_NEWT7').rows.map(r => r.slice());
-  const cid71 = P0_71.data.plan.commitments[0].id;
-  const P1_71 = plan(TP71, { income: 50000, savings: 4000, commitments: [{ id: cid71, name: 'Rent', amount: 10000 }], pace_period_end: '2026-10-05' }, T71);
-  ok('P-API2. saveMoneyPlan stores pace_period_end (text) and Pace uses it: 16 days incl. today, anchor-day pace 6000/15 = 400', P1_71.ok && P1_71.data.plan.pace_period_end === '2026-10-05' && P1_71.data.state.v2.period_end === '2026-10-05' && P1_71.data.state.v2.days_remaining_incl_today === 16 && P1_71.data.state.v2.today_pace === 400 && P1_71.data.settings.pace_period_end === '2026-10-05', J2(P1_71.data && P1_71.data.state.v2));
-  const set71b = ss.getSheetByName('SET_NEWT7').rows;
-  ok('P-API3. only the new pace_period_end row was added; balance, date, covered, income, savings, starting_balance cells byte-identical; commitments identical (legacy line just persisted with its SAME deterministic id, unpaid - Step 1.5 rule); transactions untouched', J2(set71b.slice(0, set71.length).filter(r => r[0] !== 'commitments')) === J2(set71.filter(r => r[0] !== 'commitments')) && J2(P1_71.data.plan.commitments) === J2(P0_71.data.plan.commitments) && set71b.length === set71.length + 1 && set71b[set71b.length - 1][0] === 'pace_period_end' && rowsOf('TX_NEWT7') === tx71r);
-  ok('P-API4. balance anchor + date unchanged by the period save; plan edits that omit pace_period_end leave it untouched', P1_71.data.plan.current_balance === 20000 && P1_71.data.plan.current_balance_date === T71 && (() => { const r = plan(TP71, { income: 51000, savings: 4000, commitments: [{ id: cid71, name: 'Rent', amount: 10000 }] }, T71); return r.ok && r.data.plan.pace_period_end === '2026-10-05'; })());
-  const s71c = rowsOf('SET_NEWT7');
-  ok('P-API5. rejected: end in the past, impossible date, bad format -> nothing written', [{ pace_period_end: '2026-09-19' }, { pace_period_end: '2026-02-30' }, { pace_period_end: 'soon' }].every(x => !plan(TP71, Object.assign({ income: 51000, savings: 4000, commitments: [{ id: cid71, name: 'Rent', amount: 10000 }] }, x), T71).ok) && rowsOf('SET_NEWT7') === s71c);
-  ok('P-API6. dry-run preview with a period end writes nothing and previews the new day count', (() => { const r = plan(TP71, { income: 51000, savings: 4000, commitments: [{ id: cid71, name: 'Rent', amount: 10000 }], pace_period_end: '2026-09-25', dry_run: true }, T71); return r.ok && r.data.state.v2.days_remaining_incl_today === 6 && rowsOf('SET_NEWT7') === s71c; })());
-  const P7_71 = pos(TP71, { current_balance: 15000 }, '2026-10-06');
-  ok('P-API7. a new balance dated AFTER the configured end is rejected (would leave end before the anchor) -> nothing written', !P7_71.ok && /pace period end/.test(P7_71.error) && rowsOf('SET_NEWT7') === s71c, P7_71.error);
-  ok('P-API8. reading after the period ended: no Pace (period_ended), nothing written by the read', (() => { const d = st3(TP71, '2026-10-06'); return d.state.v2.ready === false && d.state.v2.reason === 'period_ended' && d.state.position_ready === false && rowsOf('SET_NEWT7') === s71c; })());
-  const P9_71 = plan(TP71, { income: 51000, savings: 4000, commitments: [{ id: cid71, name: 'Rent', amount: 10000 }], pace_period_end: null }, T71);
-  ok('P-API9. clearing (null) returns to the calendar-month-end default', P9_71.ok && P9_71.data.plan.pace_period_end === null && P9_71.data.settings.pace_period_end === '' && P9_71.data.state.v2.period_end === '2026-09-30' && P9_71.data.state.v2.period_end_source === 'month_end');
-  ok('P-API10. position_only ignores a pace_period_end field (never written by that path)', (() => { const r = pos(TP71, { current_balance: 20000, pace_period_end: '2026-10-10' }, T71); return r.ok && r.data.plan.pace_period_end === null; })());
-  const TC71 = mkUser(35, 'NEWT8', [['key', 'value'], ['monthly_income', 50000], ['monthly_savings_target', 4000], ['fixed_monthly_expenses', 0], ['current_balance', 9000], ['current_balance_date', '2026-09-20'], ['pace_period_end', '2026-09-19']]);
-  ok('P-API11. corrupt stored period (before the balance date) -> no Pace (invalid_period), data preserved by reads', (() => { const b = rowsOf('SET_NEWT8'); const d = st3(TC71, T71); return d.state.v2.ready === false && d.state.v2.reason === 'invalid_period' && d.plan.pace_period_end === '2026-09-19' && rowsOf('SET_NEWT8') === b; })());
-  ok('P-API12. Guest default = month end; (7.2) Guest can set a demo period, Reset demo removes it', (() => { const a = st3(TG).state.v2.period_end_source === 'month_end'; const r = plan(TG, { income: 45000, savings: 10000, commitments: [], pace_period_end: '2026-10-05' }, T71); call(env, { action: 'resetGuest', token: TG }); return a && r.ok && r.data.plan.pace_period_end === '2026-10-05' && st3(TG).plan.pace_period_end === null && st3(TG).state.v2.period_end_source === 'month_end' && !/pace_period_end|current_balance_covered/.test(J2(ss.getSheetByName('SET_GUEST').rows)); })());
-  ok('P-API13. other profiles untouched by the period saves', J2(ss.getSheetByName('SET_MUH').rows) === muh71 && st3(TM).plan.pace_period_end === null);
-
-  console.log('\n== Step 7.2: user-facing Pace Period (backend surface) ==');
-  ok('Q-1. period states are surfaced as their own pace_status (not needs_position): period_ended / invalid_period', pe({ today: '2026-10-06', periodEnd: '2026-10-05' }).pace_status === 'period_ended' && pe({ periodEnd: '2026-09-09' }).pace_status === 'invalid_period' && pe({ today: '2026-10-06', periodEnd: '2026-10-05' }).period_start === '2026-09-10');
-  let TP71_72;
-  ok('Q-2. the API maps it through: state.pace_status period_ended, position_ready false, plan still complete (balance kept)', (() => { const d = st3(TP71_72 = mkUser(36, 'NEWT9', [['key', 'value'], ['monthly_income', 50000], ['monthly_savings_target', 4000], ['fixed_monthly_expenses', 0], ['current_balance', 9000], ['current_balance_date', '2026-09-20'], ['pace_period_end', '2026-09-25']]), '2026-09-28'); return d.state.pace_status === 'period_ended' && d.state.position_ready === false && d.plan.setup_state === 'complete' && d.plan.current_balance === 9000; })());
-  const ended72 = rowsOf('SET_NEWT9');
-  ok('Q-3. after the period ended: a new balance ALONE is still rejected (nothing written)', !pos(TP71_72, { current_balance: 7000 }, '2026-09-28').ok && rowsOf('SET_NEWT9') === ended72);
-  const Q4 = plan(TP71_72, { income: 50000, savings: 4000, commitments: [], current_balance: 7000, pace_period_end: '2026-10-25' }, '2026-09-28');
-  ok('Q-4. new end date + new balance saved together (the Money Plan route): new anchor Sep 28, period to Oct 25, Pace back', Q4.ok && Q4.data.plan.current_balance === 7000 && Q4.data.plan.current_balance_date === '2026-09-28' && Q4.data.plan.pace_period_end === '2026-10-25' && Q4.data.state.pace_status === 'on_pace' && Q4.data.state.v2.days_remaining_incl_today === 28, J2(Q4.data && Q4.data.state.v2));
-  ok('Q-5. extending only the end date (no new balance) resumes Pace from the old anchor; balance/date untouched', (() => { const t = mkUser(37, 'NEWT10', [['key', 'value'], ['monthly_income', 50000], ['monthly_savings_target', 4000], ['fixed_monthly_expenses', 0], ['current_balance', 9000], ['current_balance_date', '2026-09-20'], ['pace_period_end', '2026-09-25']]); const r = plan(t, { income: 50000, savings: 4000, commitments: [], pace_period_end: '2026-09-30' }, '2026-09-28'); return r.ok && r.data.plan.current_balance === 9000 && r.data.plan.current_balance_date === '2026-09-20' && r.data.state.v2.ready && r.data.state.v2.days_remaining_incl_today === 3; })());
-  const TO72 = mkUser(38, 'NEWT11');
-  const O72 = ob(TO72, { pace_period_end: '2026-10-05' });
-  ok('Q-6. onboarding saves the chosen end date atomically with the plan (balance date = today, end Oct 5)', O72.ok && O72.data.plan.pace_period_end === '2026-10-05' && O72.data.plan.current_balance_date === '2026-09-20' && O72.data.state.v2.period_end === '2026-10-05' && O72.data.state.v2.days_remaining_incl_today === 16);
-  ok('Q-7. onboarding with a past end date is rejected; nothing written, still needs_plan', (() => { const t = mkUser(39, 'NEWT12'); const b = rowsOf('SET_NEWT12'); return !ob(t, { pace_period_end: '2026-09-19' }).ok && rowsOf('SET_NEWT12') === b && st3(t).plan.setup_state === 'needs_plan'; })());
-  ok('Q-8. onboarding without an end date keeps the month-end default', (() => { const t = mkUser(40, 'NEWT13'); const r = ob(t, {}); return r.ok && r.data.plan.pace_period_end === null && r.data.state.v2.period_end === '2026-09-30'; })());
-  ok('Q-9. Guest full demo edit (plan + balance + period) then Reset demo -> SET_GUEST byte-identical to a fresh reset; private tabs untouched', (() => { call(env, { action: 'resetGuest', token: TG, today: T71 }); const clean = rowsOf('SET_GUEST'), priv = J2([ss.getSheetByName('SET_MUH').rows, ss.getSheetByName('TX_MUH').rows]); const r = plan(TG, { income: 40000, savings: 5000, commitments: [{ name: 'Gym', amount: 1000, status: 'paid' }], current_balance: 30000, display_name: 'G', minimum_daily_spend: 100, pace_period_end: '2026-10-10' }, T71); call(env, { action: 'resetGuest', token: TG, today: T71 }); return r.ok && r.data.state.v2.period_end === '2026-10-10' && rowsOf('SET_GUEST') === clean && J2([ss.getSheetByName('SET_MUH').rows, ss.getSheetByName('TX_MUH').rows]) === priv; })());
 
   console.log('\n== Legacy tabs untouched at the end ==');
   ok('legacy Transactions/Settings byte-identical to start', legacyBefore === JSON.stringify(ss.getSheetByName('Transactions').rows) + JSON.stringify(ss.getSheetByName('Settings').rows));

@@ -765,17 +765,3 @@ body {
 .is-over .pace__left, .pace__left.over { color: var(--red); }
 .plan__text { min-height: 44px; }
 .plan__field .plan__text { width: 100%; }
-
-/* ---- Step 7.2: Pace Period ("when should your money last until?") ---- */
-.plan__period-v { margin: 4px 0 2px; font-family: var(--serif); font-size: 19px; line-height: var(--lh); }
-.plan__period-acts { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.plan__period-acts .txbtn { min-height: 44px; }
-.plan__help { min-width: 44px; font-size: 16px; }
-.plan__date { min-height: 44px; font-family: var(--mono); font-size: 16px; padding: 4px 8px; margin: 4px 0; border: 1px solid var(--rule); background: var(--paper-2); color: var(--ink); max-width: 100%; }
-.plan__date:focus-visible, .plan__period-acts .txbtn:focus-visible, .period-act:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
-.plan__warn { color: var(--red); }
-.period-act { margin-top: 10px; min-height: 44px; }
-.plan__row .plan__name, .plan__row .plan__amt { min-height: 44px; }   /* 44px touch targets (were 40px) */
-
-/* ---- Step 8A: explicit first-load state (written on the page, not a spinner) ---- */
-.loadnote { margin: 0; padding: 6px 0 0; font-family: var(--serif); font-style: italic; font-size: 17px; line-height: var(--lh); color: var(--dim); }

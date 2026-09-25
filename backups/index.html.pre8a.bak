@@ -74,7 +74,6 @@
 
     <p class="dateline" id="ctx">&nbsp;</p>
     <p class="greeting" id="greet" hidden></p>
-    <p class="loadnote" id="loadNote" role="status" aria-live="polite" hidden>Loading your Pace&hellip;</p>
 
     <section class="hero" aria-live="polite">
       <div class="hero__top">

@@ -510,7 +510,6 @@ function calculateState(ctx, clientToday, settingsOverride) {
     savingsTarget: planV2.savings,
     commitments: planV2.commitments,
     minimumDailySpend: profV2.minimum_daily_spend,
-    periodEnd: profV2.pace_period_end,
     transactions: tx
   });
   return applyPaceV2_(out, v2);
@@ -532,11 +531,7 @@ function calculateState(ctx, clientToday, settingsOverride) {
 //   position.covered   ids of the expenses that already existed when the balance was declared (a snapshot of
 //                      "money available right now" already reflects them: they are NEVER deducted again). null = legacy
 //                      anchor (no snapshot list): every expense dated on/after position.date counts.
-//   periodEnd          optional 'YYYY-MM-DD' Pace Period end (inclusive). null/absent = legacy default: the last
-//                      calendar day of today's month. The period STARTS at position.date (the balance anchor).
-//                      Invalid / before the anchor -> no Pace ('invalid_period'); already passed -> no Pace
-//                      ('period_ended'). Only the day counts depend on it; no financial rule changes.
-// Formula (D = local calendar days left in the Pace Period INCLUDING today; default period end = month end):
+// Formula (D = local calendar days left in the month INCLUDING today; the period ends at month end):
 //   effective_balance = B - E(counted)   protected_money = S + C(unpaid)
 //   remaining_flexible = effective_balance - protected_money
 //   normal day:  today_pace = (start-of-day flexible) / D      tomorrow_pace = remaining_flexible / (D - 1)
@@ -556,16 +551,6 @@ function calculatePaceV2_(input) {
   var D0 = pos && typeof pos.date === 'string' ? pos.date : '';
   if (isNaN(B) || B < 0 || !isoDateOk_(D0)) { res.reason = 'needs_position'; return res; }   // missing / corrupted anchor: never guess
   if (D0 > today) { res.reason = 'position_in_future'; return res; }
-  var PE;                                                                        // effective Pace Period end (inclusive)
-  if (input.periodEnd === undefined || input.periodEnd === null || input.periodEnd === '') {
-    PE = monthEndIso_(today);                                                    // legacy default: calendar month end
-    res.period_end_source = 'month_end';
-  } else {
-    PE = String(input.periodEnd);
-    res.period_end_source = 'configured';
-    if (!isoDateOk_(PE) || PE < D0) { res.reason = 'invalid_period'; res.pace_status = 'invalid_period'; return res; }   // corrupt / before the anchor: never guess
-    if (PE < today) { res.reason = 'period_ended'; res.pace_status = 'period_ended'; res.period_end = PE; res.period_start = D0; return res; }
-  }
 
   var S = planNum_(input.savingsTarget); if (isNaN(S) || S < 0) S = 0;
   var C = 0;
@@ -589,7 +574,9 @@ function calculatePaceV2_(input) {
     if (t.date < today) before += a; else todayCounted += a;                      // YYYY-MM-DD compares as local calendar days
   });
 
-  var D = dayIndex_(PE) - dayIndex_(today) + 1, Dafter = D - 1;                // whole local days to the period end, today included / excluded
+  var y = Number(today.slice(0, 4)), m = Number(today.slice(5, 7)), dom = Number(today.slice(8, 10));
+  var dim = new Date(y, m, 0).getDate();
+  var D = dim - dom + 1, Dafter = dim - dom;                                     // whole local days, today included / excluded
   var protectedMoney = S + C;
   var anchorDay = D0 === today;
   var effStart = B - before, effNow = B - before - todayCounted;
@@ -614,7 +601,7 @@ function calculatePaceV2_(input) {
   res.savings_target = round2(S); res.remaining_commitments = round2(C); res.protected_money = round2(protectedMoney);
   res.remaining_flexible = round2(flexNow); res.remaining_flexible_start_of_day = round2(flexStart);
   res.days_remaining_incl_today = D; res.days_remaining_after_today = Dafter;
-  res.period_start = D0; res.period_end = PE;
+  res.period_end = y + '-' + (m < 10 ? '0' : '') + m + '-' + (dim < 10 ? '0' : '') + dim;
   res.today_pace = round2(paceShown); res.today_pace_unclamped = round2(paceRaw);
   res.tomorrow_pace = tomRaw === null ? null : round2(Math.max(tomRaw, 0));
   res.tomorrow_pace_unclamped = tomRaw === null ? null : round2(tomRaw);
@@ -964,7 +951,6 @@ function resetGuest_(ctx) {
     var tx = ensureTxTab_(ss, 'TX_GUEST');
     if (tx.getLastRow() > 1) tx.deleteRows(2, tx.getLastRow() - 1);
     var set = ensureSettingsTab_(ss, 'SET_GUEST', guestSettings_());
-    if (set.getLastRow() > 1) set.deleteRows(2, set.getLastRow() - 1);   // drop every key a guest edit may have added
     set.getRange(2, 1, guestSettings_().length, 2).setValues(guestSettings_());
     var rows = guestTransactions_();
     if (rows.length) tx.getRange(2, 1, rows.length, 5).setValues(rows);
@@ -1051,16 +1037,6 @@ function planNum_(v) {
   if (v === '' || v === null || v === undefined || typeof v === 'boolean') return NaN;
   var n = Number(v);
   return isFinite(n) ? n : NaN;
-}
-
-// Calendar-day index of a valid 'YYYY-MM-DD' (UTC epoch days: pure calendar maths, immune to local DST/timezone).
-function dayIndex_(iso) {
-  return Math.round(Date.UTC(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10))) / 86400000);
-}
-// Last calendar day of the month containing a valid 'YYYY-MM-DD'.
-function monthEndIso_(iso) {
-  var y = Number(iso.slice(0, 4)), m = Number(iso.slice(5, 7)), dim = new Date(y, m, 0).getDate();
-  return y + '-' + (m < 10 ? '0' : '') + m + '-' + (dim < 10 ? '0' : '') + dim;
 }
 
 // A real calendar date in YYYY-MM-DD form (no timezone maths: pure integer calendar check).
@@ -1180,14 +1156,7 @@ function profileFromSettings_(s) {
   if (typeof s.current_balance_covered === 'string' && s.current_balance_covered.trim() !== '') {
     try { var cv = JSON.parse(s.current_balance_covered); if (Array.isArray(cv)) covered = cv.map(String); } catch (e) { covered = null; }
   }
-  // Pace Period end: '' / absent = not configured (legacy month-end default); anything else is passed through as
-  // text so a corrupt value is REPORTED by the engine ('invalid_period') instead of silently becoming month end.
-  var ppe = null;
-  if (s.pace_period_end !== undefined && s.pace_period_end !== null && String(s.pace_period_end).trim() !== '') {
-    ppe = s.pace_period_end instanceof Date ? toIsoDate(s.pace_period_end) : String(s.pace_period_end).trim();
-  }
   return {
-    pace_period_end: ppe,
     covered: established ? covered : null,
     display_name: name.slice(0, DISPLAY_NAME_MAX),
     currency: cur,
@@ -1230,7 +1199,7 @@ function planFromSettings_(s, ctx) {
   return {
     setup_state: setupState,
     needs_setup: setupState === 'needs_plan',
-    editable: true,                    // Guest edits its own disposable demo plan (Step 7.2); Reset demo restores it
+    editable: !guest,
     income: round2(inc),
     savings: round2(sav),
     fixed: round2(fix),
@@ -1241,8 +1210,7 @@ function planFromSettings_(s, ctx) {
     currency: prof.currency,
     current_balance: prof.current_balance,
     current_balance_date: prof.current_balance_date,
-    minimum_daily_spend: prof.minimum_daily_spend,
-    pace_period_end: prof.pace_period_end
+    minimum_daily_spend: prof.minimum_daily_spend
   };
 }
 
@@ -1277,16 +1245,6 @@ function validateProfileExtras_(input, todayIso) {
     extra.current_balance_date = bd;
   } else if (hasDate) {
     throw new Error('current balance date needs a current balance');
-  }
-  if (input.pace_period_end !== undefined) {
-    var pe = input.pace_period_end;
-    if (pe === null || pe === '') extra.pace_period_end = '';          // clear -> legacy calendar-month-end default
-    else {
-      pe = String(pe).trim();
-      if (!isoDateOk_(pe)) throw new Error('pace period end must be a valid YYYY-MM-DD date');
-      if (pe < todayIso) throw new Error('pace period end cannot be in the past');
-      extra.pace_period_end = pe;
-    }
   }
   if (input.minimum_daily_spend !== undefined) {
     var mv = input.minimum_daily_spend;
@@ -1351,14 +1309,6 @@ function coveredJson_(ctx, anchorIso, todayIso) {
   return JSON.stringify(ids);
 }
 
-// A save must never leave a configured Pace Period ending before the balance anchor (nothing is written if it would).
-function checkPeriod_(settingsAfter) {
-  var prof = profileFromSettings_(settingsAfter);
-  if (prof.pace_period_end && prof.established && prof.pace_period_end < prof.current_balance_date) {
-    throw new Error('pace period end cannot be before the current balance date');
-  }
-}
-
 // Write one Settings cell; date-like values are stored as TEXT so Sheets never re-types them.
 function writeSettingCell_(sh, row, value, asText) {
   var rng = sh.getRange(row, 2);
@@ -1370,7 +1320,7 @@ function writeSettingCell_(sh, row, value, asText) {
 // current_balance_date, minimum_daily_spend], dry_run?}}. dry_run only returns the authoritative
 // preview; nothing is written. Guests cannot save (their shared demo plan is restored by resetGuest).
 function saveMoneyPlan_(ctx, input, clientToday) {
-  // Guest may edit its OWN demo plan (SET_GUEST only - ctx comes from the verified token); resetGuest restores it.
+  if (ctx.mode === 'guest') throw new Error('the demo plan cannot be changed');
   var todayIso = (typeof clientToday === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(clientToday))
     ? clientToday : toIsoDate(new Date());
   var existingOf = function (settings) { return planFromSettings_(settings, ctx).commitments; };
@@ -1383,7 +1333,6 @@ function saveMoneyPlan_(ctx, input, clientToday) {
     var pv = validatePlan_(input, todayIso, existingOf(cur));
     if (pv.extra.current_balance !== undefined) pv.extra.current_balance_covered = coveredJson_(ctx, pv.extra.current_balance_date, todayIso);
     var preview = mergePlanSettings_(cur, pv, todayIso);
-    checkPeriod_(preview);
     return { dry_run: true, plan: planFromSettings_(preview, ctx), state: calculateState(ctx, clientToday, preview) };
   }
 
@@ -1399,7 +1348,6 @@ function saveMoneyPlan_(ctx, input, clientToday) {
     var plan = validatePlan_(input, todayIso, existingOf(current));   // read + validated under the lock
     if (plan.extra.current_balance !== undefined) plan.extra.current_balance_covered = coveredJson_(ctx, plan.extra.current_balance_date, todayIso);
     var merged = mergePlanSettings_(current, plan, todayIso);
-    checkPeriod_(merged);
     var last = sh.getLastRow();
     var rows = last >= 2 ? sh.getRange(2, 1, last - 1, 2).getValues() : [];
     var at = {};
@@ -1409,11 +1357,11 @@ function saveMoneyPlan_(ctx, input, clientToday) {
     keys.forEach(function (k) {
       var keep = k === 'starting_balance' || k === 'starting_balance_date';
       if (at[k]) {
-        if (!keep) writeSettingCell_(sh, at[k], merged[k], k === 'current_balance_date' || k === 'current_balance_covered' || k === 'pace_period_end');   // never overwrite existing start values
+        if (!keep) writeSettingCell_(sh, at[k], merged[k], k === 'current_balance_date' || k === 'current_balance_covered');   // never overwrite existing start values
       } else {
         last = Math.max(last, 1) + 1;
         sh.getRange(last, 1).setValue(k);
-        writeSettingCell_(sh, last, merged[k], k === 'current_balance_date' || k === 'current_balance_covered' || k === 'pace_period_end');
+        writeSettingCell_(sh, last, merged[k], k === 'current_balance_date' || k === 'current_balance_covered');
       }
     });
   } finally {
@@ -1441,9 +1389,6 @@ function savePosition_(ctx, input, clientToday, todayIso) {
     if (prof.currency) delete extra.currency;                       // never overwrite a stored currency
     if (prof.display_name) delete extra.display_name;               // never overwrite a stored name
     extra.current_balance_covered = coveredJson_(ctx, extra.current_balance_date, todayIso);
-    var after = {}; Object.keys(cur).forEach(function (k) { after[k] = cur[k]; });
-    Object.keys(extra).forEach(function (k) { after[k] = extra[k]; });
-    checkPeriod_(after);
     if (dry) {
       var pv = {}; Object.keys(cur).forEach(function (k) { pv[k] = cur[k]; });
       Object.keys(extra).forEach(function (k) { pv[k] = extra[k]; });
@@ -1457,7 +1402,7 @@ function savePosition_(ctx, input, clientToday, todayIso) {
     Object.keys(extra).forEach(function (k) {
       var row = at[k];
       if (!row) { last = Math.max(last, 1) + 1; row = last; sh.getRange(row, 1).setValue(k); }
-      writeSettingCell_(sh, row, extra[k], k === 'current_balance_date' || k === 'current_balance_covered' || k === 'pace_period_end');
+      writeSettingCell_(sh, row, extra[k], k === 'current_balance_date' || k === 'current_balance_covered');
     });
   } finally {
     if (!dry) lock.releaseLock();

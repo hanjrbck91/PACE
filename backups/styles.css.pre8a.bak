@@ -776,6 +776,3 @@ body {
 .plan__warn { color: var(--red); }
 .period-act { margin-top: 10px; min-height: 44px; }
 .plan__row .plan__name, .plan__row .plan__amt { min-height: 44px; }   /* 44px touch targets (were 40px) */
-
-/* ---- Step 8A: explicit first-load state (written on the page, not a spinner) ---- */
-.loadnote { margin: 0; padding: 6px 0 0; font-family: var(--serif); font-style: italic; font-size: 17px; line-height: var(--lh); color: var(--dim); }

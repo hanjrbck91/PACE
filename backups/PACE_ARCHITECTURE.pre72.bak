@@ -1,0 +1,72 @@
+# Pace — Architecture
+
+> Current technical architecture, verified against source on 2026-09-24. Code wins if this disagrees — then fix this file.
+
+## 1. Components
+```
+Browser (vanilla JS, no build)  ──POST text/plain JSON──▶  Apps Script web app (Code.gs)  ──▶  Google Sheet (per-profile tabs)
+  https://pace-ledger.netlify.app                           /exec URL in frontend/config.js      bound spreadsheet
+```
+- **Repo:** `frontend/{index.html,styles.css,app.js,config.js}` · `apps-script/{Code.gs,appsscript.json}` (+ `Code.gs.v8.bak`, historical) · `tests/{backend_sim.js,dev_server.js,dev_runtime.js}` · `backups/` (file + production snapshots) · `docs/` (pointer only).
+- **Production IDs:** spreadsheet `1rG4C9S0_5mVGSLrvGWv8_5sQLrHD8orWMtX0bcJQYmc`; bound Apps Script project `16F5bqIdgh7hLN4GLNJ148GINDPLNqGgOMihP7KP9-ljm60CK4T-C9Ybp`; one web-app deployment (execute as owner, access Anyone; URL stable across versions). Netlify site `pace-ledger`.
+- No external dependencies, fonts, or frameworks.
+
+## 2. Google Sheet
+- `USERS`: `user_key | access_credential_hash | tx_sheet | settings_sheet | mode | active`. Rows MUHAMMED (private), FRIEND (private), GUEST (guest). Only SHA-256 hashes stored.
+- Per profile: `TX_<KEY>` (`Date | Amount | Note | Type | ID`) and `SET_<KEY>` (`key | value`). Tab names must match `^TX_` / `^SET_`. Current: `TX_MUH/SET_MUH`, `TX_FRIEND/SET_FRIEND`, `TX_GUEST/SET_GUEST`.
+- Legacy `Transactions` / `Settings` tabs are untouched pre-multi-user backups; never read.
+- **Transaction:** `date` (YYYY-MM-DD local day), `amount` (>0), `note`, `type` (`expense`|`income`; UI logs expenses), `transaction_id` (UUID; `ensureTransactionIds` backfills column E only).
+- **Settings keys:** `monthly_income`, `monthly_savings_target`, `commitments` (JSON array of `{id,name,amount,status:'unpaid'|'paid',paid_at}`), `fixed_monthly_expenses` (= sum of commitments, legacy), `display_name` (≤40), `currency` (INR|MAD|IQD|RUB), `current_balance` (≥0), `current_balance_date` (text YYYY-MM-DD), `current_balance_covered` (JSON array of transaction ids reflected in the balance snapshot; absent = legacy anchor), `minimum_daily_spend` (≥0), `pace_period_end` (text YYYY-MM-DD inclusive Pace Period end; absent/empty = calendar month end — **local Step 7.1, not in production yet**), legacy `starting_balance`, `starting_balance_date`, `metro_weekday_cost`, `weekly_auto_cost` (never used in logic). Date-like cells are written as text.
+- Limits: ≤30 commitments, names ≤40 chars, amounts ≤1e12; savings + commitments ≤ income; Guest tab capped at 300 rows.
+
+## 3. Authentication & sessions
+- `login {code}` (code-only; backend finds the single active private user whose hash matches; legacy `{profile, code}` still accepted) → HMAC-SHA256 signed token `{u, e}` (secret `SESSION_SECRET` in Script Properties; 30 days private, 24 h guest). `guest {}` → GUEST token.
+- Every other action: `resolveCtx_(token)` verifies signature + expiry → active `USERS` row (cached ≤5 min) → that profile's tabs. Client-supplied identifiers are ignored.
+- Lockout: 8 failed logins / 15 min. `active=false` revokes. Deleting `SESSION_SECRET` logs everyone out.
+- Browser: `pace_session_<USER>` `{token,user,mode}`, `pace_active_profile`, `pace_cache_v1_<USER>`, `pace_currency_<USER>`, `pace_draft_<USER>` (onboarding draft). Codes/hashes never stored. Switch user keeps sessions; Log out clears that profile; `unauthorized` or user mismatch clears that profile's session + cache.
+
+## 4. API (`doPost`; GET = `?action=ping` only, everything else `unauthorized`)
+| action | body | returns |
+|---|---|---|
+| `login` / `guest` | `{code}` / `{}` | `{token, user, mode, …}` |
+| `all` | `{token, today}` | `{user, settings, plan, transactions, state}` |
+| `addTransaction` | `{transaction:{amount,note,type,date,client_id}}` (client_id idempotent 90 s) | `{transaction, state}` |
+| `updateTransaction` | `{transaction:{transaction_id, amount?, note?}}` | `{transaction, state}` |
+| `deleteTransaction` | `{transaction:{transaction_id}}` (already absent = ok) | `{deleted_transaction_id, already_absent, state}` |
+| `saveMoneyPlan` | `{plan:{…}}` — modes below | `{settings, plan, state}` |
+| `resetGuest` | guest token only | reseeded guest data |
+All requests carry `today` (device-local YYYY-MM-DD). Writes are serialized with `LockService`; responses always carry the authoritative recomputed state.
+
+**`saveMoneyPlan` modes** (one endpoint): full plan `{income, savings, commitments[], display_name?, currency?, current_balance?, current_balance_date?, minimum_daily_spend?, pace_period_end?}` (absent optional fields untouched); `require_complete:true` = onboarding (refused if already set up); `position_only:true` = writes only `current_balance` (+date, +covered; currency/name only if empty; refused for `needs_plan`); `dry_run:true` = preview, writes nothing. `pace_period_end`: valid date ≥ today, or `null`/`""` to clear back to the month-end default; ignored by `position_only`. Every save (incl. dry run and position saves) is rejected if the resulting period end would be before the resulting balance date (`checkPeriod_`). Guest is refused. Any validation error ⇒ nothing written. Setting a balance also records `current_balance_covered` (ids of expenses dated anchor-day..today existing at save time).
+
+**`plan`** (derived by `planFromSettings_`): `setup_state` (`needs_plan`|`needs_position`|`complete`), `needs_setup` (alias), `editable`, `income`, `savings`, `fixed`, `commitments`, `remaining_commitments`, `available`, `display_name`, `currency`, `current_balance`, `current_balance_date`, `minimum_daily_spend`, `pace_period_end` (configured value or null).
+
+## 5. Pace calculation flow
+`calculateState(ctx, today)` → reads settings + transactions → legacy fields (compatibility only) → `calculatePaceV2_(input)` (pure, deterministic, no I/O) → `applyPaceV2_` maps onto state.
+- Inputs: today, planValid, position `{balance, date, covered}`, savings target, commitments, minimum daily spend, `periodEnd` (from `pace_period_end`), transactions.
+- **Pace Period:** start = `current_balance_date`; end `PE` = `periodEnd` or, if absent, the last day of today's calendar month (legacy). Invalid/corrupt or `PE < anchor` ⇒ `ready:false, reason:'invalid_period'`; `PE < today` ⇒ `reason:'period_ended'`. Day maths via `dayIndex_` (UTC epoch days — no timezone shift) and `monthEndIso_`.
+- Counted expenses = `type==='expense'`, dated anchor date..today, not in `covered`.
+- `effective_balance = B − counted`; `protected_money = savings + Σ unpaid commitments`; `remaining_flexible = effective − protected`.
+- `D` = days from today to `PE` inclusive (`dayIndex_(PE) − dayIndex_(today) + 1`); anchor day ⇒ `today_pace = flexible / max(D−1,1)` (moves with post-snapshot spending); later days ⇒ start-of-day flexible / D. `tomorrow_pace = flexible / (D−1)` (null on last day). Negative ⇒ `behind`, shown pace 0, unclamped values exposed.
+- `pace_status`: `on_pace` | `below_minimum` | `behind` | `needs_position`. Output `state.v2` fields include `ready, reason, current_balance(_date), expenses_today, expenses_counted_today, expenses_before_today, expenses_since_balance, effective_balance, savings_target, remaining_commitments, protected_money, remaining_flexible(_start_of_day), today_pace(_unclamped), tomorrow_pace(_unclamped), days_remaining_incl_today, days_remaining_after_today, anchor_day, pace_days, period_start, period_end, period_end_source (`month_end`|`configured`), minimum_daily_spend, minimum_spend_gap(_total)`. Also `state.pace_status`, `state.position_ready`, `state.pace_engine:'v2'`; legacy aliases (`remaining_spendable`, `remaining_pace`, `status`, …) are not authoritative.
+
+## 6. Frontend (`frontend/app.js`, single IIFE)
+- Boot: valid session → paint from per-profile cache → one background `all` (discarded if a write happened meanwhile — `dataEpoch`) → render; `maybeShowSetup()` routes `needs_plan` → onboarding (6 steps, one atomic save), `needs_position` → position question.
+- `render()` reads only `state.v2`; `computeOptimistic` mirrors one amount's effect until the server responds; failures roll back surgically. Undo = most recent transaction, 8 s.
+- Today presentation: `spentVsPace` / `sliderFill` (spent = `expenses_counted_today`; notch at 60 % = today's pace), OVER PACE when on_pace and spent > pace, stamp when over and `isLargeAmount` (same constants as the log-time `isLargeExpense` confirmation: `LARGE_EXPENSE_PACE_MULTIPLIER=5`, `LARGE_EXPENSE_REMAINING_RATIO=0.25`).
+- Money Plan (`#plan` page): name, income, savings, current balance, commitments with paid/unpaid toggle → Review (backend dry-run preview) → save; only changed fields are sent (balance-only ⇒ `position_only`).
+- Sheets: Month, Balance, Today's entries (edit/delete), Settings (profile, device currency, Edit Money Plan, Switch user, Log out, Reset demo for Guest), About.
+- Money formatting: `money()` via `Intl.NumberFormat` per currency; dates via `localDayKey()`.
+
+## 7. Guest
+Shared `TX_GUEST`/`SET_GUEST`; demo plan (income 45,000, savings 10,000, one 16,500 commitment, demo balance 45,000 anchored at month start, ~10 demo entries). An old Guest tab self-heals its position on `all`. `resetGuest` wipes and reseeds deterministically.
+
+## 8. Deployment
+- Backend: paste `Code.gs` into the bound project (verify SHA-256), save, Deploy → Manage deployments → edit → **New version** (URL unchanged). Current: Version 13.
+- Frontend: zip the 4 `frontend/` files → upload on Netlify pace-ledger **Deploys** page. Current: `6ab097334eab6fae293bd100`. Netlify injects a hosting comment into `index.html` (expected diff).
+- Order: backend → backend smoke → frontend → frontend smoke → integrity check. Rollback both together.
+
+## 9. Test harness
+- `tests/backend_sim.js`: runs the real `Code.gs` in an in-memory Apps Script/Sheets simulation (auth, isolation, Money Plan, V2 engine, onboarding, balance snapshot, commitments). `node tests/backend_sim.js`.
+- `tests/dev_server.js [port]`: real `Code.gs` over local HTTP seeded from a backup; serve `frontend/` separately with `config.js` pointed at it for browser E2E (codes from a private scratch file, never the repo). Env: `BLANK_FRIEND`, `DELAY_MS`, `PACE_SCRATCH`. Note: its GET handler always answers ping.
+- `tests/dev_runtime.js`: against the DEV web app (`DEV_URL`); refuses the production URL.

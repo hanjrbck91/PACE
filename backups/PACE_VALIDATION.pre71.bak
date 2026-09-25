@@ -1,0 +1,44 @@
+# Pace — Validation State
+
+> Behavioral truth. Update after every verified change; replace obsolete numbers instead of keeping them.
+
+## Current build
+- Backend `apps-script/Code.gs` — LF-normalized SHA-256 prefix `1e11c25d0bb738ff` (= production Apps Script **v13**).
+- Frontend `frontend/*` = production Netlify **`6ab097334eab6fae293bd100`** (served `app.js`, `styles.css`, `config.js` byte-identical; `index.html` differs only by Netlify's injected comment; Netlify also overlays a "Powered by Netlify" badge that is not part of the app). Re-checked 2026-09-24.
+
+## Automated tests
+| Suite | Result | Date |
+|---|---|---|
+| `node tests/backend_sim.js` | **400 passed / 0 failed** | 2026-09-24 |
+| `tests/dev_runtime.js` (DEV web app) | 35/35 historically — DEV runs old v9 code, **does not cover V2** | 2026-09-20 |
+
+`backend_sim.js` blocks: migration/auth/isolation, code-only sign-in, Money Plan, V2 Step 1 data model, Step 1.5 commitments, Step 2 engine, Step 3 onboarding/position, Step 4 state exposure, Step 5 (S5-1…21 balance edits), Step 5.5 (R1…R21 balance snapshot + paid/unpaid), legacy-tabs-untouched.
+
+## Key acceptance examples (locked in tests)
+- Balance 12,588 with 448 already logged, savings 10,000, commitments paid ⇒ flexible 2,588 ⇒ ₹258.80/day over 10 days; a later ₹200 expense ⇒ ₹238.80.
+- Same with unpaid 16,500 ⇒ −13,912 ⇒ BEHIND.
+- 20,000 − 10,000 − 5,000 unpaid ⇒ ₹500/day; marking it paid ⇒ ₹1,000/day.
+- Income/savings/commitment/name edits never change the balance or its date; balance edit writes only position cells; transactions/ids never mutated.
+- Guest cannot save a plan; cross-profile writes impossible; no secrets in responses; GET cannot read or write.
+
+## Local acceptance audit (Step 5.8, 2026-09-21, local dev backend + browser)
+PASS: new-user onboarding (validation, draft survives reload/failed save), existing-user position setup, Money Plan edits, commitments paid/unpaid, Today slider/labels/stamp/greeting, add/edit/delete/undo, balance re-anchor, currencies, Guest incl. Reset demo, auth/security, local day, widths 375×640/375/390/412/430/1000 (no overflow, targets ≥44px), accessibility basics.
+Not verified in browser: afternoon/evening greeting boundaries, screen-reader pass.
+
+## Production (Step 6) — **COMPLETE (closed 2026-09-24)**
+- **Backend smoke v13 (2026-09-21): 20/20 PASS** — Guest + code-only login, wrong code rejected, GET data denied by real `doGet`, unauthenticated/tampered token rejected, no hashes/codes/secrets, V2 fields present, new engine fields live, Guest demo intact, MUHAMMED + FRIEND byte-identical to the pre-deploy snapshot.
+- **Frontend smoke 2026-09-21: PASS** — served files match, Welcome, About, code-only sign-in form (no token in URL), Guest Today (V2 status, pace, slider, spent/left today, From tomorrow, Remaining flexible, Days left; no PROTECTED / "remaining spendable"; no greeting), Guest add + Undo.
+- **Closing verification 2026-09-24: PASS**
+  - Guest (production): Reset demo → clean demo (Coffee ₹50, Breakfast ₹90); Edit Coffee 50→65 updated row, spent, left-today and From tomorrow; Delete Breakfast removed it and updated the values; add + Undo restored; final Reset demo → Guest settings identical to the 09-21 baseline, 10 demo transactions (same notes/amounts), balance 45,000, one unpaid commitment. No JS errors; no legacy wording; no horizontal overflow at 390 px.
+  - Balance, Month, Today's entries and Settings sheets (Guest, production) render V2 values; Settings has Reset demo / Switch user / Log out and no Money Plan editor (Guest by design, D23).
+  - Money Plan page: verified with the **byte-identical production bundle** (downloaded from Netlify; only `config.js` pointed at the local dev backend) on a DEV profile — Your name, Monthly income, Savings target, Current balance (+ "As of"), commitments with the 58 px Paid/Not-yet-paid toggle, Review with backend preview; cancelled without saving. Not exercised on a private production profile (would need a private sign-in / risk to owner data).
+  - MUHAMMED and FRIEND: read-only snapshot before verification vs re-read after → transactions, settings and plan **byte-identical**. (Both profiles did change between 09-21 and 09-24 through the owner's normal use — new/removed transactions, a balance re-set with `current_balance_covered` written by v13, commitment updates — none caused by verification.)
+  - Served `app.js`/`styles.css`/`config.js` still match local; ping ok; GET data refused; suite 400/0.
+- Observation: production Guest sign-in twice hit the app's 15 s timeout ("Server timed out") before succeeding on retry — Apps Script latency spikes (known, see Architecture/limitations), not a code defect.
+
+## Known untested / weak areas
+- Money Plan editor on a private production profile (verified only with the identical bundle on DEV).
+- Real DEV web-app runtime for V2 (only simulated).
+- Same-day expense whose date is edited after a balance snapshot; device clock skew.
+- Tab left open across local midnight (resolves on next sync).
+- Multi-device concurrent edits beyond LockService serialization.

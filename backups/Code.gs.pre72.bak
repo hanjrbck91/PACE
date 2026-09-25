@@ -563,8 +563,8 @@ function calculatePaceV2_(input) {
   } else {
     PE = String(input.periodEnd);
     res.period_end_source = 'configured';
-    if (!isoDateOk_(PE) || PE < D0) { res.reason = 'invalid_period'; res.pace_status = 'invalid_period'; return res; }   // corrupt / before the anchor: never guess
-    if (PE < today) { res.reason = 'period_ended'; res.pace_status = 'period_ended'; res.period_end = PE; res.period_start = D0; return res; }
+    if (!isoDateOk_(PE) || PE < D0) { res.reason = 'invalid_period'; return res; }   // corrupt / before the anchor: never guess
+    if (PE < today) { res.reason = 'period_ended'; res.period_end = PE; return res; }
   }
 
   var S = planNum_(input.savingsTarget); if (isNaN(S) || S < 0) S = 0;
@@ -964,7 +964,6 @@ function resetGuest_(ctx) {
     var tx = ensureTxTab_(ss, 'TX_GUEST');
     if (tx.getLastRow() > 1) tx.deleteRows(2, tx.getLastRow() - 1);
     var set = ensureSettingsTab_(ss, 'SET_GUEST', guestSettings_());
-    if (set.getLastRow() > 1) set.deleteRows(2, set.getLastRow() - 1);   // drop every key a guest edit may have added
     set.getRange(2, 1, guestSettings_().length, 2).setValues(guestSettings_());
     var rows = guestTransactions_();
     if (rows.length) tx.getRange(2, 1, rows.length, 5).setValues(rows);
@@ -1230,7 +1229,7 @@ function planFromSettings_(s, ctx) {
   return {
     setup_state: setupState,
     needs_setup: setupState === 'needs_plan',
-    editable: true,                    // Guest edits its own disposable demo plan (Step 7.2); Reset demo restores it
+    editable: !guest,
     income: round2(inc),
     savings: round2(sav),
     fixed: round2(fix),
@@ -1370,7 +1369,7 @@ function writeSettingCell_(sh, row, value, asText) {
 // current_balance_date, minimum_daily_spend], dry_run?}}. dry_run only returns the authoritative
 // preview; nothing is written. Guests cannot save (their shared demo plan is restored by resetGuest).
 function saveMoneyPlan_(ctx, input, clientToday) {
-  // Guest may edit its OWN demo plan (SET_GUEST only - ctx comes from the verified token); resetGuest restores it.
+  if (ctx.mode === 'guest') throw new Error('the demo plan cannot be changed');
   var todayIso = (typeof clientToday === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(clientToday))
     ? clientToday : toIsoDate(new Date());
   var existingOf = function (settings) { return planFromSettings_(settings, ctx).commitments; };

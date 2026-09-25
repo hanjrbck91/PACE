@@ -2,7 +2,7 @@
 
 > CURRENT STATE ONLY. Read with `PACE_GUARDRAILS.md` before any work. Load the other canonical files only when the task needs them (see "Doc map"). Source code = implementation truth; `tests/` = behavioral truth; this file = what a new session must know to work safely. History lives in `PACE_CHANGELOG.md`, not here.
 >
-> Last verified: 2026-09-25 (source; backend sim 446/0; frontend dates 13/0; frontend reliability 25/0; local browser 34/34 + reliability 17/17 + layout 18/18).
+> Last verified: 2026-09-24 (source; backend sim 446/0; frontend dates 13/0; local browser 34/34 + layout 18/18; production smoke after the Step 7 deploy).
 
 ## Doc map
 | File | Read when |
@@ -21,12 +21,10 @@ Pace answers "How much can I spend today and still protect my savings?" — a **
 ## Current milestone
 **Step 7 COMPLETE — Pace Period (7.1 + 7.2) and Guest parity are LIVE in production (deployed 2026-09-24).**
 - Backend: Apps Script **Version 14** (`apps-script/Code.gs` LF SHA-256 prefix `a4bba9a032051663`). Frontend: Netlify **`6ab4fa3acba9766b6679413b`** (served `app.js`/`styles.css`/`config.js` byte-identical to local `frontend/`; `index.html` differs only by Netlify's injected comment).
-- **Local frontend is AHEAD of production: Step 8A stabilization (local only, NOT deployed).** Backend unchanged (Code.gs still == v14). Deploying 8A = frontend only, needs explicit approval.
+- Local source == production.
 - Rollback targets: Apps Script **v13** + Netlify **`6ab097334eab6fae293bd100`** (both together).
 
-**Immediate next target:** owner review of the Step 8A stabilization build, then (if approved) a frontend-only deploy; keep observing real use.
-
-**Step 8A reliability findings (2026-09-25):** first screen after sign-in was blank because sign-in and the first data read are two sequential Apps Script calls (measured warm: sign-in 2–4.7 s + read 2.6–11 s; one cold start 31.6 s) and nothing was drawn meanwhile; the old 15 s timeout aborted requests that were still succeeding, and a Google ping reply to a POST was accepted as success. Local fix: an explicit "Loading your Pace…" note ("Still loading…" after 8 s), 30 s timeout, odd replies treated as outcome-unknown, and after an unknown-outcome write the app READS the server (never re-sends) and reports what actually happened.
+**Immediate next target:** observe real use and collect feedback. No feature work in progress.
 
 ## Current system (summary — details in ARCHITECTURE)
 - **Stack:** vanilla HTML/CSS/JS on Netlify (`https://pace-ledger.netlify.app`) → Google Apps Script web app (all data over authenticated POST) → one Google Sheet with per-profile tabs.
@@ -46,7 +44,7 @@ Pace answers "How much can I spend today and still protect my savings?" — a **
 - Picking exactly the last day of the current month in the period editor stores the default ("End of this month"), which rolls to the next month end next month.
 - A tab open across local midnight keeps yesterday's day until the next reload/sync.
 - Displayed amounts round to whole units.
-- Apps Script latency: 2–11 s warm, ~18 s spikes, ~31.6 s cold start (measured 2026-09-24/25); Google occasionally answers a POST with the GET/ping reply. In production (v14 frontend) this can make a saved write look failed; the local Step 8A build checks with the server instead (not deployed yet). The data itself still arrives only as fast as Apps Script answers — 8A makes waiting explicit, it does not make the server faster.
+- Apps Script latency spikes (seen up to ~18 s on 2026-09-24) can exceed the app's 15 s timeout, and Google occasionally answers a POST with the GET/ping response. The client then treats a write as failed ("Couldn't save … Not recorded.") although the server saved it; a reload shows the true state. Pre-existing, not Step 7.
 - After Reset demo, Guest `current_balance_date` is stored as a Sheets date cell (not text); it reads back as the same local day (script timezone Asia/Kolkata), so behavior is unchanged. Candidate small fix: write it as text in `resetGuest_`.
 - Not OAuth: whoever holds an access code has the profile; tokens sit in `localStorage`; lockout is per profile.
 - Guest data (incl. Guest Money Plan edits since 7.2) is shared by all guests; Reset demo restores it.

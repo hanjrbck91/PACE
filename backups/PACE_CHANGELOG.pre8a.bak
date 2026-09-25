@@ -1,0 +1,59 @@
+# Pace — Changelog
+
+> Historical record, newest first. Concise. Not required reading; open the relevant entry only. Apps Script versions = web-app deployment versions; Netlify IDs = deploy IDs.
+
+## 2026-09-24 — Step 7: Pace Period + Guest parity deployed (COMPLETE)
+- Backend Apps Script v13 → **v14**; frontend `6ab097334eab6fae293bd100` → **`6ab4fa3acba9766b6679413b`**. Rollback: v13 + `6ab097334eab6fae293bd100`.
+- Local re-run green (446/0, 13/0, 34/34, 18/18). Backend smoke 27/28 (one over-strict raw-cell check: Guest `current_balance_date` stored as a date cell after reset, same value). Production Guest frontend smoke PASS incl. period-ended and balance-after-end flows. FRIEND byte-identical; MUHAMMED changed only by the owner's own activity (1 expense, name set).
+- Seen: Apps Script latency/ping-echo can make a saved write look failed (pre-existing).
+
+## 2026-09-24 — Step 7.2: user-facing Pace Period + Guest parity (local, not deployed)
+- "When should your money last until?" in onboarding step 5 and Money Plan (default End of this month; Change / Use end of this month / ⓘ); Settings row + *Edit Pace period*; Today dateline "Pace until …"; PERIOD ENDED / CHECK YOUR DATE states with *Set Pace period*; new balance while the period is over is explained and must be saved with a new end date.
+- Backend: `pace_status` = `period_ended`/`invalid_period` for those states; Guest may save its own Money Plan (D23 changed on the owner's instruction); `resetGuest` now clears all Guest settings rows before re-seeding.
+- Tests: backend 446/0 (+9, 11 Guest tests rewritten), frontend date helpers 13/0, browser E2E 34/34 + layout 18/18. Fixed pre-existing 40 px commitment inputs → 44 px.
+
+## 2026-09-24 — Step 7.1: Pace Period foundation (local, not deployed)
+- New optional setting `pace_period_end` (text, inclusive). Period = `current_balance_date` → `pace_period_end`; absent = calendar month end (legacy, unchanged). Engine day counts now use the period end (`dayIndex_`, `monthEndIso_`); all financial rules untouched; still one engine.
+- `saveMoneyPlan` accepts `pace_period_end` (≥ today, or null to clear); `checkPeriod_` rejects any save leaving the end before the balance date. Invalid stored end ⇒ `invalid_period`; passed ⇒ `period_ended` (no Pace). `state.v2` adds `period_start`, `period_end_source`; `plan.pace_period_end`.
+- +37 tests; suite 437/0. No frontend change, no production change.
+
+## 2026-09-24 — Step 6 closed (verification only)
+- Production Guest: Edit, Delete, Undo, Reset demo; Balance, Month, Today's entries, Settings sheets — all PASS; Guest restored to the clean demo.
+- Money Plan page verified with the byte-identical production bundle on a DEV profile (no private production sign-in).
+- MUHAMMED/FRIEND byte-identical before vs after verification (read-only). Served files still match; suite 400/0. No deploy, no code change. **Step 6 COMPLETE.**
+
+## 2026-09-24 — Development operating system
+- Canonical docs established: PACE_CONTEXT (current state), PACE_GUARDRAILS, PACE_DECISIONS, PACE_ARCHITECTURE, PACE_VALIDATION, PACE_ROADMAP, this changelog. Old monolithic PACE_CONTEXT backed up to `backups/PACE_CONTEXT.preOS.bak`; `README.md` and `docs/*.md` reduced to pointers (originals in `backups/*.preOS.bak`).
+- No application code, production data or deployment changed. Suite 400/0.
+
+## 2026-09-21 — Step 6: V2 production deployment (verification incomplete)
+- Backend Apps Script v12 → **v13** (Steps 4–5.8 backend: balance snapshot `current_balance_covered`, anchor-day pace). Backend smoke 20/20; private profiles byte-identical to pre-deploy snapshot.
+- Frontend `6ab012dc762d7bd31cd715fe` → **`6ab097334eab6fae293bd100`**; served files match local.
+- Frontend smoke partial (Welcome, About, sign-in form, Guest Today, Guest add+undo OK); Guest edit/delete/reset, sheets, Money Plan render and post-deploy integrity re-check not done (interrupted).
+- Rollback: v12 + `6ab012dc762d7bd31cd715fe`.
+
+## 2026-09-21 — Step 5.8: Today slider + three spending states (local)
+- Pace slider = today's spending vs today's pace; "left today"/"over today" labels; OVER PACE today-level status; "YOU SPENT A LOT TODAY." stamp via the large-expense rule; PROTECTED removed from Today; greeting boundaries 12/18h; `display_name` editable in Money Plan. Final acceptance audit READY; suite 400/0.
+- (Before it: a full-screen "ledger" Today layout was tried and rejected; Today stays Pace-first.)
+
+## 2026-09-20/21 — Step 5.5: balance semantics + paid/unpaid (local)
+- Balance = snapshot of money available now; `current_balance_covered` records already-logged expense ids so they are not deducted again; anchor-day pace uses days after today. Commitment paid/unpaid toggle in Money Plan. 19 older expectations updated to the new semantics; +21 tests (R1–R21); 400/0.
+
+## 2026-09-20 — Step 5: editable Current Balance in Money Plan (local)
+- Balance field in Money Plan; only changed fields sent; balance-only edit = position save; unrelated edits never reset the anchor. +21 tests; 379/0.
+
+## 2026-09-20 — Step 4: Today = presentation of `state.v2` (Netlify `6ab012dc762d7bd31cd715fe`)
+- Engine was right; screen had mapped legacy fields. Main screen switched to V2 fields/states. Frontend only.
+
+## 2026-09-20 — Money Model V2 Steps 1–3 (Apps Script v12, Netlify `6ab00a1dd3d6617cbc465293`)
+- Step 1 V2 profile keys + `setup_state`; Step 1.5 commitments `{id,name,amount,status,paid_at}`; Step 2 pure engine `calculatePaceV2_` (balance anchor − expenses − savings − unpaid commitments); Step 3 onboarding + position setup. Private users started as `needs_position` (no invented balance).
+
+## 2026-09-20 — Welcome + code-only sign-in (Apps Script v11 / Netlify `6aafb05db0540af6e23c1859`); Money Plan V1 (v10 / `6aafa42e8aa7ece91ab3cb27`)
+- Profile-agnostic Welcome; login by code only. In-app income/savings/commitments editing.
+
+## 2026-09-20 — Multi-user cutover (Apps Script v9, Netlify `6aaf2eb28aa7ecabc9b3cc78`)
+- Access codes + signed sessions + per-profile tabs + Guest (Google OAuth abandoned). Legacy tabs kept as backups; 93 transactions preserved. Pre-cutover backup: `backups/prod_cutover_backup_20260920_061311.json` + Drive copy `1DsGzKcdoDPGyF5oc47pzNA6KGK40k9F36xR0Mt7xOgg`. Rollback-of-last-resort: v8 (`apps-script/Code.gs.v8.bak`).
+
+## 2026-09-07 → 09-19 — MVP V1 (Apps Script v1–v8)
+- Single-user sheet app; ledger UI chosen over dial; dynamic pace replaced fixed allowance; stable `transaction_id` + edit/delete/undo; optimistic UI; multi-currency display; device-local day (v8).
+- Legacy V1 formula (superseded by V2, kept only as compatibility fields): `discretionary = income − savings − fixed`; `total_spendable = discretionary × period_days / days_in_month`; `today_pace = max(total_spendable − expenses_before_today, 0) / days_incl_today`; `remaining_pace = max(total_spendable − expenses_through_today, 0) / days_after_today`.

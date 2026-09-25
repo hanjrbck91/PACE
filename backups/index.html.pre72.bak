@@ -74,7 +74,6 @@
 
     <p class="dateline" id="ctx">&nbsp;</p>
     <p class="greeting" id="greet" hidden></p>
-    <p class="loadnote" id="loadNote" role="status" aria-live="polite" hidden>Loading your Pace&hellip;</p>
 
     <section class="hero" aria-live="polite">
       <div class="hero__top">
@@ -82,7 +81,6 @@
         <span class="stamp" id="stamp" hidden>You spent<br>a lot today.</span>
       </div>
       <p class="diff"><mark class="hl" id="diff">&nbsp;</mark></p>
-      <button class="txbtn period-act" id="periodAct" type="button" hidden>Set Pace period</button>
     </section>
 
     <section class="pace">

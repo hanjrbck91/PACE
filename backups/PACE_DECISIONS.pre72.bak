@@ -1,0 +1,49 @@
+# Pace — Durable Decisions
+
+> Decisions that govern future work. Changing any of them needs explicit owner approval (see GUARDRAILS §1.14). Reasons are kept to one line; history is in `PACE_CHANGELOG.md`.
+
+## Product
+- **D1. Pace is a dynamic spending trajectory, not a fixed daily budget.** Spending today changes the future pace; underspending raises it, overspending lowers it. *Why:* a fixed allowance failed under real unexpected expenses.
+- **D2. Show consequences, don't prescribe.** One understandable daily signal, useful at the moment of spending. The user stays in control.
+- **D3. Not a budgeting/accounting dashboard.** No categories, charts, dashboard widgets or feature expansion "because it's possible"; observe real usage first.
+- **D4. The savings target is protected** and owned by the user; nothing auto-raises, lowers or reinterprets it.
+
+## Money semantics (Money Model V2)
+- **D5. Current balance = the money the user actually has available right now**, declared by the user. It is a snapshot anchor: never income, never `starting_balance`, never derived, never a transaction, never reset monthly, never auto-increased by income.
+- **D6. A new balance replaces the previous anchor** (value + device-local date + snapshot of already-logged expense ids). Expenses already reflected in the snapshot are never deducted again; expenses logged afterwards count; expenses dated before the anchor date never count.
+- **D7. Protected money = savings target + UNPAID commitments.** Paid commitments are not protected. Paid/unpaid is set only by the user (`paid_at` = device-local day); never inferred from transactions, never auto-marked; marking paid creates no transaction.
+- **D8. Remaining flexible = balance − counted expenses − protected.** Negative ⇒ BEHIND: the pace shows 0/day and the deficit stays visible (never hidden, never a fake positive pace).
+- **D9. Days:** device-local calendar days to the end of the **Pace Period** (default: end of the calendar month — see D9a). On the anchor day today is already accounted for ⇒ pace uses days after today; on later days pace uses days including today (start-of-day, so today's own spending moves tomorrow, not today).
+- **D9a. Pace Period (Step 7.1):** the period starts at the balance anchor (`current_balance_date`) and ends on `pace_period_end` (inclusive). No separate start date exists; a new balance is a new start. Absent end = last day of the current calendar month (legacy behavior preserved exactly). Only day counts depend on the period — no financial rule changes with it.
+- **D9b. Invalid periods never produce a guessed Pace:** end before the anchor or corrupt ⇒ no Pace (`invalid_period`); end already passed ⇒ no Pace (`period_ended`); a save may never leave the end before the balance date (rejected, nothing written); a new end must be today or later. End == anchor day = a one-day period (pace over 1 day, no tomorrow), consistent with the last-day-of-month rule. *(Provisional until 7.2 decides the UX for an ended period.)*
+- **D10. Minimum daily spend is a realism warning only** (BELOW MINIMUM + gap); it never changes the pace or the savings target.
+- **D11. No income is ever added automatically**; onboarding income is a planning input, not a transaction.
+- **D12. No fallback Pace.** Missing/invalid plan or balance ⇒ no Pace (setup flow), never a guess from legacy fields.
+- **D13. Legacy data is preserved, not reinterpreted:** `starting_balance*`, `fixed_monthly_expenses` (= sum of commitments), metro/auto rows stay but are not the Pace model. A legacy single "Fixed expenses" commitment is never split automatically.
+- **D14. Currency is a display unit only** (INR, MAD, IQD, RUB); no FX, no conversion.
+- **D15. "Today" is the device-local calendar day**; no timezone setting, no server date, no `toISOString()`.
+
+## Engineering
+- **D16. One Pace engine:** `calculatePaceV2_` in the backend is the single source of financial truth; the frontend presents server state and never recomputes finances (optimistic mirror is replaced by the server response).
+- **D17. Simple stack on purpose:** vanilla JS + Apps Script + Google Sheet; no framework/DB until real usage demands it.
+- **D18. Performance model:** cache-first startup, optimistic mutations with surgical rollback, one request per action, 15 s timeout + one retry only for idempotent requests; a stale read never overwrites a newer write.
+- **D19. Commitment ids and transaction ids are stable identities** — never reused, never derived from position/name/amount.
+- **D20. Writes only through the existing endpoints**; balance-only edits use the position save; unrelated plan edits never reset the balance anchor.
+
+## Auth & security
+- **D21. Lightweight private access, not OAuth** (deliberately): code-only sign-in, SHA-256 hashes in `USERS`, HMAC-signed stateless tokens, per-profile tabs. Codes never stored in source/docs/frontend.
+- **D22. Isolation by token only:** client-supplied user keys/sheet names are never used for authorization.
+- **D23. Guest is a disposable full-product demo** on shared data with a demo position; it can add/edit/delete/undo/reset but cannot save a Money Plan and never touches private tabs. No greeting for Guest.
+- **D24. No data over GET**; tokens never in URLs.
+
+## UI (accepted)
+- **D25. Notebook identity:** warm paper, horizontal ruling, red margin line, serif headings, monospace/tabular money, restrained red/green, no dark/fintech look, cards, gradients, glassmorphism, dials or charts. Mobile-first; 44 px targets; status never communicated by colour alone; reduced motion respected.
+- **D26. Today is Pace-first** (a full-screen "ledger" layout was tried and rejected): status → Today's Pace → Pace slider → spent/left-or-over today → From tomorrow / Remaining flexible / Days left → Today's expenses (the integrated ledger) → + Log an expense. PROTECTED and "remaining spendable" are not shown on Today.
+- **D27. Pace slider = today's spending vs today's pace only** (notch = today's pace, presentation only, `aria-hidden`). Labels "₹X spent today" and "₹Y left today" / "₹Y over today"; remaining flexible is a separate period-level row.
+- **D28. Status words:** ON PACE, BELOW MINIMUM, BEHIND, plus today-level OVER PACE (V2 on pace but today's spending exceeded today's pace). BEHIND wins. The "YOU SPENT A LOT TODAY." stamp uses the existing large-expense rule (> 5× today's pace or > 25 % of positive flexible money) and may accompany BEHIND or OVER PACE.
+- **D29. Greeting:** "Good morning/afternoon/evening, <display_name>." from device time (00–11:59 / 12–17:59 / 18–23:59); none for Guest or empty name. `display_name` is edited in Money Plan.
+- **D30. Large-expense confirmation is a sanity check, never a limit.**
+
+## Process
+- **D31. Development and production deployment are separate phases**; deploy only with explicit approval, backend before frontend, record real rollback targets.
+- **D32. Canonical memory = the PACE_* files**; chat is for discussion, code/tests/production are the truth.

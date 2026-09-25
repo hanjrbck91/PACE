@@ -370,17 +370,12 @@
         saveCache();
         render({ keepDelta: true });
       })
-      .catch(function (err) {
+      .catch(function () {
         // 3. surgical rollback: re-insert the exact row, reverse the Pace delta
         store.tx.splice(Math.min(idx, store.tx.length), 0, txObj);
         store.state = computeOptimistic(store.state, +amount, +1);
         render({ keepDelta: true });
-        if (!outcomeUnknown(err)) { showLogError("Couldn’t delete — restored."); return; }
-        showLogError("Checking with the server…");
-        return reconcile().then(function (d) {
-          var still = (d.transactions || []).some(function (t) { return t.transaction_id === id; });
-          showLogError(still ? "Couldn’t delete — it is still there." : "Deleted.");
-        }, function () { showLogError("Couldn’t confirm the delete. Reload Pace to see the latest."); });
+        showLogError("Couldn’t delete — restored.");
       })
       .then(function () { delete opInFlight[id]; });
   }
@@ -415,17 +410,12 @@
         saveCache();
         render({ keepDelta: true });
       })
-      .catch(function (err) {
+      .catch(function () {
         // 3. surgical rollback: restore exact prior values, reverse the delta
         txObj.amount = oldAmount; txObj.note = oldNote;
         store.state = computeOptimistic(store.state, -delta, 0);
         render({ keepDelta: true });
-        if (!outcomeUnknown(err)) { showLogError("Couldn’t save the edit — restored."); return; }
-        showLogError("Checking with the server…");
-        return reconcile().then(function (d) {
-          var t = (d.transactions || []).filter(function (x) { return x.transaction_id === id; })[0];
-          showLogError(t && Number(t.amount) === amount && (t.note || "") === note ? "Edit saved." : "The edit wasn’t saved — showing what the server has.");
-        }, function () { showLogError("Couldn’t confirm the edit. Reload Pace to see the latest."); });
+        showLogError("Couldn’t save the edit — restored.");
       })
       .then(function () { delete opInFlight[id]; });
   }
@@ -556,9 +546,7 @@
   // business error (ok:false, e.g. validation) is NEVER retried. The POST
   // carries a client_id so its single retry is duplicate-safe: the backend
   // dedups the id within a 90s window and still returns a fresh state.
-  // 30 s: measured Apps Script latency on 2026-09-25 was 2-11 s warm, ~18 s spikes and ~31.6 s on a cold start; the old
-  // 15 s limit aborted requests that were still succeeding (a write could be saved while the UI said it failed).
-  var REQ_TIMEOUT_MS = 30000;
+  var REQ_TIMEOUT_MS = 15000;
 
   function fetchWithTimeout(url, opts, ms) {
     opts = opts || {};
@@ -597,7 +585,7 @@
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" }, // no CORS preflight
       body: JSON.stringify(payload)
-    }, REQ_TIMEOUT_MS).then(function (res) { return readJson(res, payload.action); });
+    }, REQ_TIMEOUT_MS).then(readJson);
   }
   var dataEpoch = 0;     // bumped by every real write (not dry-run previews): a load that started before it is stale
   function apiPost(payload) {
@@ -619,14 +607,11 @@
     });
   }
 
-  function readJson(res, expected) {
+  function readJson(res) {
     return res.text().then(function (txt) {
       var body;
       try { body = JSON.parse(txt); }
       catch (e) { throw new Error("Unexpected reply from the server."); } // transient (retryable)
-      if (expected && body && body.action && body.action !== expected) {
-        throw new Error("Unexpected reply from the server.");            // e.g. a ping reply to a POST: outcome unknown, transient
-      }
       if (!body || body.ok !== true) {
         var be = new Error(humanError(body && body.error));
         be.business = true;   // server-returned failure → do NOT retry
@@ -641,22 +626,7 @@
     if (/amount must be/i.test(s)) return "Enter a valid amount.";
     if (/not found/i.test(s)) return "The sheet is not set up yet.";
     if (/busy/i.test(s)) return "Server busy — try again.";
-    if (/pace period end cannot be before/i.test(s)) return "Your Pace period has ended. Set a new \u201cmoney should last until\u201d date first (Settings \u2192 Edit Pace period).";
-    if (/pace period end cannot be in the past/i.test(s)) return "Choose today or a later date for when your money should last until.";
-    if (/pace period end must be/i.test(s)) return "Choose a valid date for when your money should last until.";
     return s || "Something went wrong on the server.";
-  }
-  // A failure is "unknown outcome" when the server never gave a business answer (timeout, network, odd reply):
-  // a write may or may not have been applied, so the UI must never claim "not saved" without checking.
-  function outcomeUnknown(err) { return !(err && err.business); }
-  // Read-only: fetch the authoritative state and show it (used after an unknown-outcome write). Never writes.
-  function reconcile() {
-    return apiGet("all").then(function (d) {
-      if (d.user && session && d.user.key !== session.user) { onAuthLost(d.user.key); throw new Error("session changed"); }
-      store.state = d.state; store.settings = d.settings; store.tx = d.transactions || []; store.plan = d.plan || null;
-      saveCache(); clearSyncNote(); render();
-      return d;
-    });
   }
   function niceNetwork(err) {
     var m = (err && err.message) || "";
@@ -693,10 +663,9 @@
   function greetingText() {
     var name = store.plan && store.plan.display_name;
     if (!name || (session && session.mode === "guest")) return "";
-    return greetingFor(new Date().getHours()) + ", " + name + ".";
+    var h = new Date().getHours();
+    return (h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening") + ", " + name + ".";
   }
-  // Device-local hour -> greeting: 00:00-11:59 morning, 12:00-17:59 afternoon, 18:00-23:59 evening.
-  function greetingFor(h) { return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"; }
 
   // Pace slider = PRESENTATION ONLY (aria-hidden; the same facts are printed beside it). It shows TODAY'S SPENDING
   // against TODAY'S PACE and nothing else: the notch at 60% is today_pace, the fill is spent / today_pace
@@ -731,8 +700,7 @@
     app.removeAttribute("data-state");
     app.classList.remove("is-over", "is-under", "is-on", "is-min", "is-need", "sev1", "sev2", "sev3");
 
-    $("ctx").textContent = fmtDate(s.as_of) + "  ·  " + (v && v.ready && v.period_end_source === "configured" && v.period_end
-      ? "Pace until " + shortDate(v.period_end) : "day " + m.day_of_month + " of " + m.days_in_month);
+    $("ctx").textContent = fmtDate(s.as_of) + "  ·  day " + m.day_of_month + " of " + m.days_in_month;
     var g = greetingText(), ge = $("greet");
     ge.textContent = g; ge.hidden = !g;
 
@@ -744,8 +712,7 @@
       return;
     }
 
-    var ps = v.ready ? v.pace_status : (v.reason === "period_ended" || v.reason === "invalid_period" ? v.reason : "needs_position");
-    $("periodAct").hidden = !(ps === "period_ended" || ps === "invalid_period");
+    var ps = v.ready ? v.pace_status : "needs_position";
     var word, cls, line;
     if (ps === "behind") {
       word = "BEHIND"; cls = "is-over";
@@ -760,12 +727,6 @@
     } else if (ps === "on_pace") {
       word = "ON PACE"; cls = "is-on";
       line = "Staying on pace keeps your savings protected.";
-    } else if (ps === "period_ended") {
-      word = "PERIOD ENDED"; cls = "is-need";                        // the balance is still valid — only the end date has passed
-      line = "Your Pace period ended on <b>" + fmtDate(v.period_end) + "</b>. Set a new end date to continue.";
-    } else if (ps === "invalid_period") {
-      word = "CHECK YOUR DATE"; cls = "is-need";
-      line = "Your \u201cmoney should last until\u201d date needs fixing. Set a new end date to continue.";
     } else {
       word = "POSITION NEEDED"; cls = "is-need";
       line = "Add what you have right now to see your pace.";
@@ -850,19 +811,7 @@
     return (months[mi] || "") + " " + parseInt(parts[2], 10) + ", " + parts[0];
   }
 
-  var loadTimer = null;
-  function setLoading(on) {
-    var n = $("loadNote"); if (!n) return;
-    clearTimeout(loadTimer);
-    n.hidden = !on;
-    if (!on) return;
-    n.textContent = "Loading your Pace\u2026";
-    loadTimer = setTimeout(function () {
-      n.textContent = "Still loading \u2014 Pace\u2019s server can take up to half a minute to wake up.";
-    }, 8000);
-  }
   function fatal(msg) {
-    setLoading(false);
     var err = $("err");
     err.textContent = msg;
     err.hidden = false;
@@ -904,8 +853,6 @@
         w.appendChild(row("Pace from tomorrow", v2.tomorrow_pace === null ? "\u2014" : money(v2.tomorrow_pace) + " / day"));
         w.appendChild(row("Days left (incl. today)", String(v2.days_remaining_incl_today)));
         w.appendChild(row("Period ends", fmtDate(v2.period_end)));
-      } else if (v2 && v2.reason === "period_ended") {
-        w.appendChild(row("Pace period", "ended " + fmtDate(v2.period_end)));
       } else {
         w.appendChild(row("Position", "not set yet"));
       }
@@ -920,9 +867,7 @@
           ". Expenses you log since then are taken off; income is never added for you."));
       } else {
         sheetContent.appendChild(el("p", "big-num", "\u2014"));
-        sheetContent.appendChild(el("p", "note-line", bv && (bv.reason === "period_ended" || bv.reason === "invalid_period")
-          ? "Your balance is still saved. Your Pace period ended on " + fmtDate(bv.period_end || "") + " \u2014 set a new end date to continue."
-          : "Set what you have available right now to see your balance."));
+        sheetContent.appendChild(el("p", "note-line", "Set what you have available right now to see your balance."));
       }
 
     } else if (kind === "log" && s) {
@@ -957,21 +902,15 @@
       c.appendChild(row("Savings target", money(pl ? pl.savings : cfg.monthly_savings_target)));
       c.appendChild(row("Committed" + (pl && pl.commitments.length ? " (" + pl.commitments.length + ")" : ""), money(pl ? pl.fixed : cfg.fixed_monthly_expenses)));
       c.appendChild(row("Current balance", pl && pl.current_balance != null ? money(pl.current_balance) : "Not set"));
-      if (pl && pl.current_balance_date) {
-        var pEnd = pl.pace_period_end || (s && s.v2 && s.v2.period_end) || monthEndKey(localDayKey());
-        c.appendChild(row("Pace period", shortDate(pl.current_balance_date) + " \u2192 " + shortDate(pEnd) + (pl.pace_period_end ? "" : " (month end)")));
-      }
       sheetContent.appendChild(c);
       if (store.plan && store.plan.editable) {
         var mp = el("button", "txbtn plan-edit", "Edit Money Plan"); mp.type = "button";
         mp.addEventListener("click", function () { closeSheet(); openPlan("edit"); });
-        var pp = el("button", "txbtn plan-edit", "Edit Pace period"); pp.type = "button";
-        pp.addEventListener("click", function () { closeSheet(); openPlan("edit", "period"); });
-        var mpw = el("div", "acct"); mpw.appendChild(mp); mpw.appendChild(pp); sheetContent.appendChild(mpw);
+        var mpw = el("div", "acct"); mpw.appendChild(mp); sheetContent.appendChild(mpw);
       }
       sheetContent.appendChild(el("p", "hint",
         "Currency sets the display unit only — Pace never converts your money, so the numbers stay the same." +
-        (session && session.mode === "guest" ? " Demo changes are shared with other guests; Reset demo restores the demo." : "")));
+        (store.plan && !store.plan.editable ? " The demo Money Plan is fixed." : "")));
 
       // Account actions
       var acct = el("div", "acct");
@@ -1110,31 +1049,14 @@
         clearSyncNote();
         render({ keepDelta: true });                 // no re-ink; keep the delta flash
       })
-      .catch(function (err) {
+      .catch(function () {
         if (undoT.cancelled) return;                 // already undone locally; nothing recorded
-        var label = "“" + (noteVal || money(val)) + "”";
-        if (!outcomeUnknown(err)) {
-          // the server answered "no": rollback the optimistic tx + restore prior state; nothing was cached
-          store.tx = prevTx; store.state = prevState;
-          if (undoTarget === undoT) { clearTimeout(undoTimer); hideUndoBar(); }
-          render();
-          showLogError("Couldn’t save " + label + " — " + err.message + " Not recorded.");
-          return;
-        }
-        // Outcome unknown (slow server / odd reply): the write may have landed. Never claim "not recorded" and never
-        // re-send it; ask the server what it has (read-only) and show that.
+        // rollback: drop the optimistic tx + restore prior state; nothing was cached
+        store.tx = prevTx;
+        store.state = prevState;
         if (undoTarget === undoT) { clearTimeout(undoTimer); hideUndoBar(); }
-        showLogError("Checking with the server whether " + label + " was saved…");
-        var known = {}; prevTx.forEach(function (t) { if (t.transaction_id) known[t.transaction_id] = true; });
-        return reconcile().then(function (d) {
-          var found = (d.transactions || []).some(function (t) {
-            return !known[t.transaction_id] && t.date === dayKey && Number(t.amount) === val && (t.note || "") === noteVal && t.type === "expense";
-          });
-          showLogError(found ? label + " was saved." : label + " wasn’t saved. You can log it again.");
-        }, function () {
-          store.tx = prevTx; store.state = prevState; render();
-          showLogError("Couldn’t confirm whether " + label + " was saved. Reload Pace before logging it again.");
-        });
+        render();                                    // clears the optimistic delta too
+        showLogError("Couldn’t save “" + (noteVal || money(val)) + "”. Not recorded.");
       })
       .then(function () { submitting = false; });     // always release the guard
   }
@@ -1183,69 +1105,19 @@
   var PLAN_STEPS = 4;
   var planOrig = null;      // what the editor opened with: only fields the user actually CHANGES are ever sent (an untouched balance never resets its anchor date)
 
-  function blankDraft() { return { name: "", income: "", savings: "", balance: "", periodEnd: "", commitments: [] }; }
+  function blankDraft() { return { name: "", income: "", savings: "", balance: "", commitments: [] }; }
   function draftFromPlan(pl, blankIfSetup) {
     if (!pl || (blankIfSetup && pl.needs_setup && !(pl.income > 0))) return blankDraft();
     return {
-      name: pl.display_name || "", income: String(pl.income), savings: String(pl.savings), periodEnd: pl.pace_period_end || "",
+      name: pl.display_name || "", income: String(pl.income), savings: String(pl.savings),
       balance: pl.current_balance != null ? String(pl.current_balance) : "",
       commitments: (pl.commitments || []).map(function (c) { return { id: c.id, name: c.name, amount: String(c.amount), status: c.status === "paid" ? "paid" : "unpaid", paid_at: c.paid_at || null }; })
     };
   }
   function snapshotPlan(pl) {
     if (!pl) return null;
-    return { name: String(pl.display_name || ""), periodEnd: pl.pace_period_end || "", income: Number(pl.income), savings: Number(pl.savings), balance: pl.current_balance != null ? Number(pl.current_balance) : null,
+    return { name: String(pl.display_name || ""), income: Number(pl.income), savings: Number(pl.savings), balance: pl.current_balance != null ? Number(pl.current_balance) : null,
       commitments: (pl.commitments || []).map(function (c) { return { name: c.name, amount: Number(c.amount), status: c.status === "paid" ? "paid" : "unpaid" }; }) };
-  }
-  // ---- Pace Period (Step 7.2): the user only chooses WHEN the money should last until. The period always starts at
-  // the current-balance date; '' = the default (end of this calendar month). Pure local-calendar string maths.
-  function monthEndKey(dayKey) {
-    var y = parseInt(dayKey.slice(0, 4), 10), m = parseInt(dayKey.slice(5, 7), 10);
-    var dim = new Date(y, m, 0).getDate();
-    return dayKey.slice(0, 8) + (dim < 10 ? "0" : "") + dim;
-  }
-  function shortDate(iso) { return fmtDate(iso).replace(/, \d{4}$/, ""); }
-  function periodField(draft, key, onChange, opts) {
-    opts = opts || {};
-    var today = localDayKey();
-    var box = el("div", "plan__field plan__period"); box.id = "periodField";
-    box.appendChild(el("span", "label", "When should your money last until?"));
-    var val = el("p", "plan__period-v");
-    var note = el("p", "plan__asof");
-    var acts = el("div", "plan__period-acts");
-    var change = el("button", "txbtn", "Change"); change.type = "button"; change.id = "periodChange";
-    var reset = el("button", "txbtn", "Use end of this month"); reset.type = "button";
-    var help = el("button", "txbtn plan__help", "\u24d8"); help.type = "button";
-    help.setAttribute("aria-label", "What is this?"); help.setAttribute("aria-expanded", "false");
-    var helpText = el("p", "hint plan__hint", "Pace normally runs until the end of the month. If you get paid on another date, " +
-      "set it to last until your next pay day. Your Pace always starts from your current balance date.");
-    helpText.hidden = true;
-    var inp = el("input", "plan__date"); inp.type = "date"; inp.id = "periodDate"; inp.min = today; inp.hidden = true;
-    inp.setAttribute("aria-label", "Money should last until (date)");
-    function paint() {
-      var v = draft[key] || "";
-      if (v) { val.textContent = fmtDate(v); reset.hidden = false; }
-      else { val.textContent = "End of this month \u00b7 " + fmtDate(monthEndKey(today)); reset.hidden = true; }
-      var ended = v && v < today;
-      note.textContent = ended ? "This period ended on " + fmtDate(v) + ". Choose a new date to continue." : (opts.fromDate ? "Starts from your balance date, " + fmtDate(opts.fromDate) + "." : "");
-      note.hidden = !note.textContent;
-      note.classList.toggle("plan__warn", !!ended);
-    }
-    change.addEventListener("click", function () {
-      inp.hidden = false; inp.value = draft[key] && draft[key] >= today ? draft[key] : monthEndKey(today); inp.focus();
-      if (typeof inp.showPicker === "function") { try { inp.showPicker(); } catch (e) {} }
-    });
-    inp.addEventListener("change", function () {
-      if (!inp.value) return;
-      draft[key] = inp.value === monthEndKey(today) && !opts.keepExplicitMonthEnd ? "" : inp.value;
-      paint(); if (onChange) onChange();
-    });
-    reset.addEventListener("click", function () { draft[key] = ""; inp.hidden = true; paint(); if (onChange) onChange(); change.focus(); });
-    help.addEventListener("click", function () { helpText.hidden = !helpText.hidden; help.setAttribute("aria-expanded", helpText.hidden ? "false" : "true"); });
-    acts.appendChild(change); acts.appendChild(reset); acts.appendChild(help);
-    box.appendChild(val); box.appendChild(inp); box.appendChild(acts); box.appendChild(note); box.appendChild(helpText);
-    paint();
-    return box;
   }
   function numOrNaN(v) { v = String(v == null ? "" : v).trim(); if (v === "") return NaN; var n = Number(v); return isFinite(n) ? n : NaN; }
   // Clean draft -> payload; returns { error } or { plan, sums }.
@@ -1270,38 +1142,30 @@
       bal = numOrNaN(planDraft.balance);
       if (isNaN(bal) || bal < 0) return { error: "Enter what you have available now (0 or more).", step: 2 };
     }
-    var pe = String(planDraft.periodEnd || ""), today = localDayKey(), origPe = (planOrig && planOrig.periodEnd) || "";
-    if (pe && pe !== origPe && pe < today) return { error: "Choose today or a later date for when your money should last until.", step: 2 };
-    // A new balance starts a new Pace period today: it cannot be saved while the chosen end date is already in the past.
-    if (planMode === "edit" && bal !== null && (!planOrig || bal !== planOrig.balance) && pe && pe < today) {
-      return { error: "Your Pace period ended on " + fmtDate(pe) + ". Choose a new \u201cmoney should last until\u201d date (or end of this month) \u2014 it is saved together with your new balance.", step: 2 };
-    }
-    return { plan: { income: inc, savings: sav, commitments: list }, fixed: fixed, balance: bal, periodEnd: pe, name: String(planDraft.name || "").trim().slice(0, 40), available: inc - sav - fixed };
+    return { plan: { income: inc, savings: sav, commitments: list }, fixed: fixed, balance: bal, name: String(planDraft.name || "").trim().slice(0, 40), available: inc - sav - fixed };
   }
   // What did the user actually change? (compared with what the editor opened with)
   function planChanges(r) {
     var o = planOrig || { income: NaN, savings: NaN, balance: null, commitments: [] };
     var same = r.plan.income === o.income && r.plan.savings === o.savings && r.plan.commitments.length === o.commitments.length &&
       r.plan.commitments.every(function (c, i) { return c.name === o.commitments[i].name && c.amount === o.commitments[i].amount && c.status === o.commitments[i].status; });
-    return { planChanged: !same, balanceChanged: r.balance !== null && r.balance !== o.balance, nameChanged: planMode === "edit" && (r.name || "") !== (o.name || ""),
-      periodChanged: planMode === "edit" && (r.periodEnd || "") !== (o.periodEnd || "") };
+    return { planChanged: !same, balanceChanged: r.balance !== null && r.balance !== o.balance, nameChanged: planMode === "edit" && (r.name || "") !== (o.name || "") };
   }
   // Request body: a balance-only edit is a POSITION save (nothing else is rewritten); otherwise the full plan, plus
   // current_balance ONLY when the user changed it. The balance date is always the device's local day (server-side default).
   function planPayload(r, dry) {
     var ch = planChanges(r), p;
-    if (!ch.planChanged && !ch.nameChanged && !ch.periodChanged && ch.balanceChanged) p = { position_only: true, current_balance: r.balance };
+    if (!ch.planChanged && !ch.nameChanged && ch.balanceChanged) p = { position_only: true, current_balance: r.balance };
     else {
       p = { income: r.plan.income, savings: r.plan.savings, commitments: r.plan.commitments };
       if (ch.balanceChanged) p.current_balance = r.balance;
       if (ch.nameChanged) p.display_name = r.name;            // the existing display_name field (empty = no greeting)
-      if (ch.periodChanged) p.pace_period_end = r.periodEnd || null;   // null = back to the end-of-month default
     }
     if (dry) p.dry_run = true;
     return p;
   }
 
-  function openPlan(mode, focus) {
+  function openPlan(mode) {
     planMode = mode; planStep = mode === "edit" ? 0 : 1; planPreview = null; planBusy = false;
     planDraft = draftFromPlan(store.plan, mode === "setup");
     planOrig = snapshotPlan(store.plan);
@@ -1309,11 +1173,6 @@
     $("app").hidden = true; $("plan").hidden = false;
     renderPlan();
     window.scrollTo(0, 0);
-    if (focus === "period") {
-      var pf = document.getElementById("periodField"), pc = document.getElementById("periodChange");
-      if (pf && pf.scrollIntoView) pf.scrollIntoView({ block: "center" });
-      if (pc) pc.focus();
-    }
   }
   function closePlan() {
     planOpen = false; planDraft = null;
@@ -1415,7 +1274,7 @@
     function btn(text, cls, fn) { var b = el("button", cls, text); b.type = "button"; b.addEventListener("click", fn); actions.appendChild(b); return b; }
 
     if (edit && planStep === 0) {
-      var nf = el("div", "plan__field"); nf.hidden = !!(session && session.mode === "guest");   // Guest has no greeting
+      var nf = el("div", "plan__field");
       nf.appendChild(el("label", "label", "Your name"));
       var ni = textField("pName", "Your name", planDraft.name || "", function (v) { planDraft.name = v; });
       ni.placeholder = "Used for the greeting"; nf.appendChild(ni);
@@ -1429,7 +1288,6 @@
         ? "As of " + fmtDate(pl0.current_balance_date) + ". Saving a new amount makes today your new starting point."
         : "Not set yet. Add it to see your pace."));
       body.appendChild(bf);
-      body.appendChild(periodField(planDraft, "periodEnd", null, { fromDate: pl0.current_balance_date }));
       var ch = el("div", "plan__field");
       ch.appendChild(el("span", "label", "Committed expenses"));
       var tot0 = el("span", "plan__total");
@@ -1441,7 +1299,7 @@
       btn("Review", "gate__go", function () {
         var r = readDraft(); if (r.error) { showErr(r.error); return; }
         var chg = planChanges(r);
-        if (!chg.planChanged && !chg.balanceChanged && !chg.nameChanged && !chg.periodChanged) { closePlan(); return; }      // nothing to save: no request
+        if (!chg.planChanged && !chg.balanceChanged && !chg.nameChanged) { closePlan(); return; }      // nothing to save: no request
         planStep = 4; renderPlan(); loadPreview();
       });
       root.appendChild(actions);
@@ -1491,7 +1349,6 @@
       led.appendChild(row("Savings target", money(r.plan.savings)));
       var curBal = r.balance !== null ? r.balance : (planOrig ? planOrig.balance : null);
       if (edit) led.appendChild(row("Current balance", curBal !== null ? money(curBal) + (chg4.balanceChanged ? " · from today" : "") : "Not set"));
-      if (edit) led.appendChild(row("Money lasts until", r.periodEnd ? fmtDate(r.periodEnd) : "End of this month (" + fmtDate(monthEndKey(localDayKey())) + ")"));
       led.appendChild(row("Committed expenses", money(r.fixed)));
       if (edit) led.appendChild(row("Still unpaid (protected)", money(r.plan.commitments.reduce(function (t, c) { return t + (c.status === "paid" ? 0 : c.amount); }, 0))));
       body.appendChild(led);
@@ -1539,21 +1396,19 @@
       .then(function (d) { if (!planOpen || planStep !== mine) return; planPreview = d; paintPreview(); })
       .catch(function (e) {
         if (!planOpen || planStep !== mine) return;
-        if (e && e.business) { paintPreview(e.message); return; }
-        paintPreview("Couldn\u2019t calculate the preview \u2014 the server is slow. You can still save; your Pace updates after saving.");
-        var go = $("planGo"); if (go) go.disabled = planBusy;
+        paintPreview(e && e.business ? e.message : niceNetwork(e) + " Go back and try again.");
       });
   }
 
   // Save: show the confirmed-by-backend preview immediately (optimistic), persist,
   // then reconcile with the authoritative response; a failure restores everything.
   function savePlan(plan) {
-    if (planBusy) return;
+    if (planBusy || !planPreview) return;
     planBusy = true;
     var prev = { state: store.state, plan: store.plan, settings: store.settings };
     var draft = planDraft, mode = planMode;
     var rNow = readDraft();     // computed BEFORE the editor closes (closePlan clears the draft)
-    if (planPreview) { store.state = planPreview.state; store.plan = planPreview.plan; }   // optimistic only when a preview exists
+    store.state = planPreview.state; store.plan = planPreview.plan;
     closePlan();
     var payload = rNow.error ? { income: plan.income, savings: plan.savings, commitments: plan.commitments } : planPayload(rNow, false);
     apiPost({ action: "saveMoneyPlan", today: localDayKey(), client_id: newClientId(), plan: payload })
@@ -1563,32 +1418,13 @@
       })
       .catch(function (e) {
         store.state = prev.state; store.plan = prev.plan; store.settings = prev.settings;
-        function reopen(msg) {
-          planBusy = false;
-          planMode = mode; planDraft = draft; planStep = 4; planPreview = null; planOpen = true;
-          $("app").hidden = true; $("plan").hidden = false;
-          renderPlan();
-          var er = $("plan").querySelector(".plan__err");
-          if (er) { er.textContent = msg; er.hidden = false; }
-          loadPreview();
-        }
-        if (!outcomeUnknown(e)) { reopen("Couldn\u2019t save \u2014 " + e.message + " Nothing was changed."); return; }
-        // Unknown outcome: ask the server (read-only) whether the plan landed before saying anything.
-        render(); showLogError("Checking with the server whether your Money Plan was saved\u2026");
-        reconcile().then(function (d) {
-          var p = d.plan || {};
-          var landed = p.income === payload.income || payload.position_only;
-          if (payload.savings !== undefined) landed = landed && p.savings === payload.savings;
-          if (payload.current_balance !== undefined) landed = landed && p.current_balance === payload.current_balance;
-          if (payload.pace_period_end !== undefined) landed = landed && (p.pace_period_end || null) === (payload.pace_period_end || null);
-          if (payload.display_name !== undefined) landed = landed && (p.display_name || "") === payload.display_name;
-          planBusy = false;
-          if (landed) { showLogError("Money Plan saved."); return; }
-          reopen("Your Money Plan wasn\u2019t saved \u2014 nothing was changed. You can try again.");
-        }, function () {
-          planBusy = false;
-          showLogError("Couldn\u2019t confirm whether your Money Plan was saved. Reload Pace and check it before saving again.");
-        });
+        planBusy = false;
+        planMode = mode; planDraft = draft; planStep = 4; planPreview = null; planOpen = true;
+        $("app").hidden = true; $("plan").hidden = false;
+        renderPlan();
+        var er = $("plan").querySelector(".plan__err");
+        if (er) { er.textContent = "Couldn\u2019t save — " + (e && e.business ? e.message : niceNetwork(e)) + " Nothing was changed."; er.hidden = false; }
+        loadPreview();
       });
   }
 
@@ -1609,13 +1445,12 @@
       if (!o || o.v !== 1 || !o.d || typeof o.d !== "object") return null;
       var d = o.d, out = blankOb();
       ["name", "currency", "income", "savings", "balance"].forEach(function (k) { if (typeof d[k] === "string") out[k] = d[k].slice(0, 60); });
-      if (typeof d.periodEnd === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d.periodEnd)) out.periodEnd = d.periodEnd;
       if (Array.isArray(d.commitments)) out.commitments = d.commitments.slice(0, 30).map(function (c) { return { name: String((c && c.name) || "").slice(0, 40), amount: String((c && c.amount) || "").slice(0, 20) }; });
       if (!CURRENCIES[out.currency]) out.currency = "";
       return { step: clamp(Number(o.step) || 1, 1, OB_STEPS), d: out };
     } catch (e) { return null; }
   }
-  function blankOb() { return { name: "", currency: "", income: "", savings: "", balance: "", periodEnd: "", commitments: [] }; }
+  function blankOb() { return { name: "", currency: "", income: "", savings: "", balance: "", commitments: [] }; }
   function localCurrencyChoice() {          // only a choice the user actually made on this device
     try { var c = localStorage.getItem(currencyKey()); return c && CURRENCIES[c] ? c : ""; } catch (e) { return ""; }
   }
@@ -1673,8 +1508,7 @@
     if (step === 2 && !CURRENCIES[d.currency]) return "Choose a currency.";
     if (step === 3) { var inc = numOrNaN(d.income); if (isNaN(inc) || inc <= 0) return "Enter your monthly income (more than 0)."; }
     if (step === 4) { var sv = numOrNaN(d.savings); if (isNaN(sv) || sv < 0) return "Enter your savings target (0 or more)."; }
-    if (step === 5) { var b = numOrNaN(d.balance); if (isNaN(b) || b < 0) return "Enter what you have available now (0 or more).";
-      if (d.periodEnd && d.periodEnd < localDayKey()) return "Choose today or a later date for when your money should last until."; }
+    if (step === 5) { var b = numOrNaN(d.balance); if (isNaN(b) || b < 0) return "Enter what you have available now (0 or more)."; }
     if (step === 6) {
       var sum = 0, bad = null;
       d.commitments.forEach(function (c) {
@@ -1726,7 +1560,6 @@
       q("How much money do you have available right now?");
       body.appendChild(el("p", "hint plan__hint", "This is what you actually have available today."));
       body.appendChild(pAmountField("obBalance", "Money available now", d.balance, function (v) { d.balance = v; }));
-      body.appendChild(periodField(d, "periodEnd", saveDraft));
     } else {
       q("Anything already committed?");
       body.appendChild(el("p", "hint plan__hint", "Optional — rent, EMI, bills you already know you will pay. You can skip this."));
@@ -1768,24 +1601,14 @@
     var d = obDraft, chosenCur = d.currency;
     apiPost({ action: "saveMoneyPlan", today: localDayKey(), client_id: newClientId(), plan: {
       require_complete: true, display_name: String(d.name).trim(), currency: d.currency,
-      income: numOrNaN(d.income), savings: numOrNaN(d.savings), current_balance: numOrNaN(d.balance), commitments: obCommitList(),
-      pace_period_end: d.periodEnd || undefined } })
+      income: numOrNaN(d.income), savings: numOrNaN(d.savings), current_balance: numOrNaN(d.balance), commitments: obCommitList() } })
       .then(function (data) { setCurrency(chosenCur); finishSetup(data); })
       .catch(function (e) {
-        if (outcomeUnknown(e)) {
-          return apiGet("all").then(function (d) {
-            if (d.plan && d.plan.setup_state === "complete") { setCurrency(chosenCur); finishSetup(d); return; }
-            throw e;
-          }).catch(function () { return Promise.reject(e); }).catch(onboardFail);
-        }
-        onboardFail(e);
-      });
-    function onboardFail(e) {
         obBusy = false; go.disabled = false; go.textContent = "Start my Pace";
         if (e && e.business && /already set up/i.test(e.message)) { clearDraft(); planOpen = false; load(); return; }   // server wins
         err.textContent = "Couldn’t save — " + (e && e.business ? e.message : niceNetwork(e)) + " Your answers are still here.";
         err.hidden = false;
-    }
+      });
   }
 
   function renderPosition() {
@@ -1813,17 +1636,10 @@
       apiPost({ action: "saveMoneyPlan", today: localDayKey(), client_id: newClientId(), plan: plan })
         .then(finishSetup)
         .catch(function (e2) {
-          if (outcomeUnknown(e2)) {
-            return apiGet("all").then(function (d) { if (d.plan && d.plan.setup_state === "complete") finishSetup(d); else throw e2; })
-              .catch(function () { posFail(e2); });
-          }
-          posFail(e2);
-        });
-      function posFail(e2) {
           obBusy = false; go.disabled = false; go.textContent = "Continue";
           err.textContent = "Couldn’t save — " + (e2 && e2.business ? e2.message : niceNetwork(e2)) + " Your answer is still here.";
           err.hidden = false;
-      }
+        });
     });
     root.appendChild(form);
     $("posBalance").focus();
@@ -1862,17 +1678,12 @@
   }
   function resetDemo(btn) {
     btn.disabled = true; btn.textContent = "Resetting…";
-    apiPost({ action: "resetGuest", client_id: newClientId(), today: localDayKey() })   // resetting twice = same result (safe retry)
+    apiPostOnce({ action: "resetGuest", today: localDayKey() })
       .then(function (d) {
         store.state = d.state; store.settings = d.settings; store.tx = d.transactions || []; store.plan = d.plan || null;
         saveCache(); hideUndoBar(); render();
       })
-      .catch(function (err) {
-        if (!outcomeUnknown(err)) { showLogError("Couldn’t reset the demo — " + err.message); return; }
-        showLogError("Checking with the server…");
-        return reconcile().then(function () { hideUndoBar(); showLogError("Showing the demo as the server has it now."); },
-          function () { showLogError("Couldn’t confirm the reset. Reload Pace to see the latest."); });
-      })
+      .catch(function (err) { showLogError("Couldn’t reset the demo — " + niceNetwork(err)); })
       .then(function () { btn.disabled = false; btn.textContent = "Reset demo"; });
   }
 
@@ -1961,23 +1772,20 @@
     var code = $("gateCode").value;
     if (!code) { gateError("Enter your access code."); return; }
     var go = $("gateGo"); go.disabled = true; go.textContent = "Checking…"; $("gateErr").hidden = true;
-    var slow = setTimeout(function () { go.textContent = "Still checking…"; }, 8000);
     apiPostOnce({ action: "login", code: code })
-      .catch(function (err) { if (outcomeUnknown(err)) return apiPostOnce({ action: "login", code: code }); throw err; })   // sign-in writes nothing on success
       .then(enterSession)
       .catch(function (err) {
         gateError(err && err.business ? err.message : niceNetwork(err));
         $("gateCode").select();
       })
-      .then(function () { clearTimeout(slow); go.disabled = false; go.textContent = "CONTINUE"; });
+      .then(function () { go.disabled = false; go.textContent = "CONTINUE"; });
   }
   function doGuest() {
     // Feel immediate: paint the (skeleton) app now, get the guest session in the background.
-    showApp(); setLoading(true);
+    showApp();
     apiPostOnce({ action: "guest" })
       .then(enterSession)
       .catch(function (err) {
-        setLoading(false);
         showGate();
         welcomeNote(err && err.business ? err.message : niceNetwork(err));
       });
@@ -1991,7 +1799,6 @@
     // 1. Hydrate instantly from cache if we have a valid one (no skeleton).
     var cached = loadCache();
     var hydrated = false;
-    if (!cached) setLoading(true);             // explicit "Loading your Pace…" instead of an empty page
     if (cached) {
       store.state = cached.state;
       store.settings = cached.settings;
@@ -2006,7 +1813,6 @@
     var epoch0 = dataEpoch;
     apiGet("all")
       .then(function (d) {
-        setLoading(false);
         if (d.user && session && d.user.key !== session.user) { onAuthLost(d.user.key); return; }
         if (epoch0 !== dataEpoch) return;     // a write happened while this read was in flight: its answer is stale, the write's response is newer
         store.state = d.state;
@@ -2038,7 +1844,6 @@
       b.addEventListener("click", function () { openSheet(b.getAttribute("data-sheet")); });
     });
     $("add").addEventListener("click", function () { openSheet("add"); });
-    $("periodAct").addEventListener("click", function () { openPlan("edit", "period"); });
     Array.prototype.forEach.call(sheet.querySelectorAll("[data-close]"), function (b) {
       b.addEventListener("click", closeSheet);
     });

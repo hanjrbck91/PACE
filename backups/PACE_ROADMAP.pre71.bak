@@ -1,0 +1,31 @@
+# Pace — Roadmap
+
+> Direction, not commitments. Nothing here is approved for implementation until the owner says so for a specific task. Check `PACE_DECISIONS.md` for conflicts first.
+
+## NOW
+- **Observe real use / collect feedback** on V2 (owner + friend + guests) before expanding.
+
+## NEXT (candidates, need an explicit product decision)
+- **Configurable Pace Period** (e.g. salary cycle 25th → 24th instead of calendar month). Changes day counting (D9) — calculation-semantics change, needs approval and tests.
+- **Guest / profile improvements** as appropriate (Guest parity with the private flow where sensible; profile/name management).
+- **"What is Pace?" explanation / contextual help** in-app.
+
+## LATER
+- Additional users (beyond MUHAMMED/FRIEND; today users are provisioned by hand in `USERS`).
+- Profile page / name management beyond the Money Plan "Your name" field.
+- Contextual check-ins.
+- Pace Review (looking back at a period).
+- Historical Pace visualization (must respect D3 — no dashboard drift).
+- UI to set `minimum_daily_spend` (engine already supports it).
+- Backend-synced currency choice.
+
+## IDEAS / UNDECIDED (parked)
+- Savings recovery over later months (never auto-raise the target).
+- Emergency fund.
+- PWA (manifest, service worker).
+- Per-transaction timestamps (would refine the balance snapshot).
+- Transaction/commitment matching (UPI/bank) — only through a separate matching layer that flips commitment status.
+- Manual timezone, Undo stack, date editing, real OAuth/DB backend — only if the user base outgrows the MVP.
+
+## Done (for orientation)
+Time-based greeting and editable `display_name` shipped in Step 5.8 (now in production).

@@ -370,17 +370,12 @@
         saveCache();
         render({ keepDelta: true });
       })
-      .catch(function (err) {
+      .catch(function () {
         // 3. surgical rollback: re-insert the exact row, reverse the Pace delta
         store.tx.splice(Math.min(idx, store.tx.length), 0, txObj);
         store.state = computeOptimistic(store.state, +amount, +1);
         render({ keepDelta: true });
-        if (!outcomeUnknown(err)) { showLogError("Couldn’t delete — restored."); return; }
-        showLogError("Checking with the server…");
-        return reconcile().then(function (d) {
-          var still = (d.transactions || []).some(function (t) { return t.transaction_id === id; });
-          showLogError(still ? "Couldn’t delete — it is still there." : "Deleted.");
-        }, function () { showLogError("Couldn’t confirm the delete. Reload Pace to see the latest."); });
+        showLogError("Couldn’t delete — restored.");
       })
       .then(function () { delete opInFlight[id]; });
   }
@@ -415,17 +410,12 @@
         saveCache();
         render({ keepDelta: true });
       })
-      .catch(function (err) {
+      .catch(function () {
         // 3. surgical rollback: restore exact prior values, reverse the delta
         txObj.amount = oldAmount; txObj.note = oldNote;
         store.state = computeOptimistic(store.state, -delta, 0);
         render({ keepDelta: true });
-        if (!outcomeUnknown(err)) { showLogError("Couldn’t save the edit — restored."); return; }
-        showLogError("Checking with the server…");
-        return reconcile().then(function (d) {
-          var t = (d.transactions || []).filter(function (x) { return x.transaction_id === id; })[0];
-          showLogError(t && Number(t.amount) === amount && (t.note || "") === note ? "Edit saved." : "The edit wasn’t saved — showing what the server has.");
-        }, function () { showLogError("Couldn’t confirm the edit. Reload Pace to see the latest."); });
+        showLogError("Couldn’t save the edit — restored.");
       })
       .then(function () { delete opInFlight[id]; });
   }
@@ -556,9 +546,7 @@
   // business error (ok:false, e.g. validation) is NEVER retried. The POST
   // carries a client_id so its single retry is duplicate-safe: the backend
   // dedups the id within a 90s window and still returns a fresh state.
-  // 30 s: measured Apps Script latency on 2026-09-25 was 2-11 s warm, ~18 s spikes and ~31.6 s on a cold start; the old
-  // 15 s limit aborted requests that were still succeeding (a write could be saved while the UI said it failed).
-  var REQ_TIMEOUT_MS = 30000;
+  var REQ_TIMEOUT_MS = 15000;
 
   function fetchWithTimeout(url, opts, ms) {
     opts = opts || {};
@@ -597,7 +585,7 @@
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" }, // no CORS preflight
       body: JSON.stringify(payload)
-    }, REQ_TIMEOUT_MS).then(function (res) { return readJson(res, payload.action); });
+    }, REQ_TIMEOUT_MS).then(readJson);
   }
   var dataEpoch = 0;     // bumped by every real write (not dry-run previews): a load that started before it is stale
   function apiPost(payload) {
@@ -619,14 +607,11 @@
     });
   }
 
-  function readJson(res, expected) {
+  function readJson(res) {
     return res.text().then(function (txt) {
       var body;
       try { body = JSON.parse(txt); }
       catch (e) { throw new Error("Unexpected reply from the server."); } // transient (retryable)
-      if (expected && body && body.action && body.action !== expected) {
-        throw new Error("Unexpected reply from the server.");            // e.g. a ping reply to a POST: outcome unknown, transient
-      }
       if (!body || body.ok !== true) {
         var be = new Error(humanError(body && body.error));
         be.business = true;   // server-returned failure → do NOT retry
@@ -645,18 +630,6 @@
     if (/pace period end cannot be in the past/i.test(s)) return "Choose today or a later date for when your money should last until.";
     if (/pace period end must be/i.test(s)) return "Choose a valid date for when your money should last until.";
     return s || "Something went wrong on the server.";
-  }
-  // A failure is "unknown outcome" when the server never gave a business answer (timeout, network, odd reply):
-  // a write may or may not have been applied, so the UI must never claim "not saved" without checking.
-  function outcomeUnknown(err) { return !(err && err.business); }
-  // Read-only: fetch the authoritative state and show it (used after an unknown-outcome write). Never writes.
-  function reconcile() {
-    return apiGet("all").then(function (d) {
-      if (d.user && session && d.user.key !== session.user) { onAuthLost(d.user.key); throw new Error("session changed"); }
-      store.state = d.state; store.settings = d.settings; store.tx = d.transactions || []; store.plan = d.plan || null;
-      saveCache(); clearSyncNote(); render();
-      return d;
-    });
   }
   function niceNetwork(err) {
     var m = (err && err.message) || "";
@@ -693,10 +666,9 @@
   function greetingText() {
     var name = store.plan && store.plan.display_name;
     if (!name || (session && session.mode === "guest")) return "";
-    return greetingFor(new Date().getHours()) + ", " + name + ".";
+    var h = new Date().getHours();
+    return (h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening") + ", " + name + ".";
   }
-  // Device-local hour -> greeting: 00:00-11:59 morning, 12:00-17:59 afternoon, 18:00-23:59 evening.
-  function greetingFor(h) { return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"; }
 
   // Pace slider = PRESENTATION ONLY (aria-hidden; the same facts are printed beside it). It shows TODAY'S SPENDING
   // against TODAY'S PACE and nothing else: the notch at 60% is today_pace, the fill is spent / today_pace
@@ -850,19 +822,7 @@
     return (months[mi] || "") + " " + parseInt(parts[2], 10) + ", " + parts[0];
   }
 
-  var loadTimer = null;
-  function setLoading(on) {
-    var n = $("loadNote"); if (!n) return;
-    clearTimeout(loadTimer);
-    n.hidden = !on;
-    if (!on) return;
-    n.textContent = "Loading your Pace\u2026";
-    loadTimer = setTimeout(function () {
-      n.textContent = "Still loading \u2014 Pace\u2019s server can take up to half a minute to wake up.";
-    }, 8000);
-  }
   function fatal(msg) {
-    setLoading(false);
     var err = $("err");
     err.textContent = msg;
     err.hidden = false;
@@ -1110,31 +1070,14 @@
         clearSyncNote();
         render({ keepDelta: true });                 // no re-ink; keep the delta flash
       })
-      .catch(function (err) {
+      .catch(function () {
         if (undoT.cancelled) return;                 // already undone locally; nothing recorded
-        var label = "“" + (noteVal || money(val)) + "”";
-        if (!outcomeUnknown(err)) {
-          // the server answered "no": rollback the optimistic tx + restore prior state; nothing was cached
-          store.tx = prevTx; store.state = prevState;
-          if (undoTarget === undoT) { clearTimeout(undoTimer); hideUndoBar(); }
-          render();
-          showLogError("Couldn’t save " + label + " — " + err.message + " Not recorded.");
-          return;
-        }
-        // Outcome unknown (slow server / odd reply): the write may have landed. Never claim "not recorded" and never
-        // re-send it; ask the server what it has (read-only) and show that.
+        // rollback: drop the optimistic tx + restore prior state; nothing was cached
+        store.tx = prevTx;
+        store.state = prevState;
         if (undoTarget === undoT) { clearTimeout(undoTimer); hideUndoBar(); }
-        showLogError("Checking with the server whether " + label + " was saved…");
-        var known = {}; prevTx.forEach(function (t) { if (t.transaction_id) known[t.transaction_id] = true; });
-        return reconcile().then(function (d) {
-          var found = (d.transactions || []).some(function (t) {
-            return !known[t.transaction_id] && t.date === dayKey && Number(t.amount) === val && (t.note || "") === noteVal && t.type === "expense";
-          });
-          showLogError(found ? label + " was saved." : label + " wasn’t saved. You can log it again.");
-        }, function () {
-          store.tx = prevTx; store.state = prevState; render();
-          showLogError("Couldn’t confirm whether " + label + " was saved. Reload Pace before logging it again.");
-        });
+        render();                                    // clears the optimistic delta too
+        showLogError("Couldn’t save “" + (noteVal || money(val)) + "”. Not recorded.");
       })
       .then(function () { submitting = false; });     // always release the guard
   }
@@ -1539,21 +1482,19 @@
       .then(function (d) { if (!planOpen || planStep !== mine) return; planPreview = d; paintPreview(); })
       .catch(function (e) {
         if (!planOpen || planStep !== mine) return;
-        if (e && e.business) { paintPreview(e.message); return; }
-        paintPreview("Couldn\u2019t calculate the preview \u2014 the server is slow. You can still save; your Pace updates after saving.");
-        var go = $("planGo"); if (go) go.disabled = planBusy;
+        paintPreview(e && e.business ? e.message : niceNetwork(e) + " Go back and try again.");
       });
   }
 
   // Save: show the confirmed-by-backend preview immediately (optimistic), persist,
   // then reconcile with the authoritative response; a failure restores everything.
   function savePlan(plan) {
-    if (planBusy) return;
+    if (planBusy || !planPreview) return;
     planBusy = true;
     var prev = { state: store.state, plan: store.plan, settings: store.settings };
     var draft = planDraft, mode = planMode;
     var rNow = readDraft();     // computed BEFORE the editor closes (closePlan clears the draft)
-    if (planPreview) { store.state = planPreview.state; store.plan = planPreview.plan; }   // optimistic only when a preview exists
+    store.state = planPreview.state; store.plan = planPreview.plan;
     closePlan();
     var payload = rNow.error ? { income: plan.income, savings: plan.savings, commitments: plan.commitments } : planPayload(rNow, false);
     apiPost({ action: "saveMoneyPlan", today: localDayKey(), client_id: newClientId(), plan: payload })
@@ -1563,32 +1504,13 @@
       })
       .catch(function (e) {
         store.state = prev.state; store.plan = prev.plan; store.settings = prev.settings;
-        function reopen(msg) {
-          planBusy = false;
-          planMode = mode; planDraft = draft; planStep = 4; planPreview = null; planOpen = true;
-          $("app").hidden = true; $("plan").hidden = false;
-          renderPlan();
-          var er = $("plan").querySelector(".plan__err");
-          if (er) { er.textContent = msg; er.hidden = false; }
-          loadPreview();
-        }
-        if (!outcomeUnknown(e)) { reopen("Couldn\u2019t save \u2014 " + e.message + " Nothing was changed."); return; }
-        // Unknown outcome: ask the server (read-only) whether the plan landed before saying anything.
-        render(); showLogError("Checking with the server whether your Money Plan was saved\u2026");
-        reconcile().then(function (d) {
-          var p = d.plan || {};
-          var landed = p.income === payload.income || payload.position_only;
-          if (payload.savings !== undefined) landed = landed && p.savings === payload.savings;
-          if (payload.current_balance !== undefined) landed = landed && p.current_balance === payload.current_balance;
-          if (payload.pace_period_end !== undefined) landed = landed && (p.pace_period_end || null) === (payload.pace_period_end || null);
-          if (payload.display_name !== undefined) landed = landed && (p.display_name || "") === payload.display_name;
-          planBusy = false;
-          if (landed) { showLogError("Money Plan saved."); return; }
-          reopen("Your Money Plan wasn\u2019t saved \u2014 nothing was changed. You can try again.");
-        }, function () {
-          planBusy = false;
-          showLogError("Couldn\u2019t confirm whether your Money Plan was saved. Reload Pace and check it before saving again.");
-        });
+        planBusy = false;
+        planMode = mode; planDraft = draft; planStep = 4; planPreview = null; planOpen = true;
+        $("app").hidden = true; $("plan").hidden = false;
+        renderPlan();
+        var er = $("plan").querySelector(".plan__err");
+        if (er) { er.textContent = "Couldn\u2019t save — " + (e && e.business ? e.message : niceNetwork(e)) + " Nothing was changed."; er.hidden = false; }
+        loadPreview();
       });
   }
 
@@ -1772,20 +1694,11 @@
       pace_period_end: d.periodEnd || undefined } })
       .then(function (data) { setCurrency(chosenCur); finishSetup(data); })
       .catch(function (e) {
-        if (outcomeUnknown(e)) {
-          return apiGet("all").then(function (d) {
-            if (d.plan && d.plan.setup_state === "complete") { setCurrency(chosenCur); finishSetup(d); return; }
-            throw e;
-          }).catch(function () { return Promise.reject(e); }).catch(onboardFail);
-        }
-        onboardFail(e);
-      });
-    function onboardFail(e) {
         obBusy = false; go.disabled = false; go.textContent = "Start my Pace";
         if (e && e.business && /already set up/i.test(e.message)) { clearDraft(); planOpen = false; load(); return; }   // server wins
         err.textContent = "Couldn’t save — " + (e && e.business ? e.message : niceNetwork(e)) + " Your answers are still here.";
         err.hidden = false;
-    }
+      });
   }
 
   function renderPosition() {
@@ -1813,17 +1726,10 @@
       apiPost({ action: "saveMoneyPlan", today: localDayKey(), client_id: newClientId(), plan: plan })
         .then(finishSetup)
         .catch(function (e2) {
-          if (outcomeUnknown(e2)) {
-            return apiGet("all").then(function (d) { if (d.plan && d.plan.setup_state === "complete") finishSetup(d); else throw e2; })
-              .catch(function () { posFail(e2); });
-          }
-          posFail(e2);
-        });
-      function posFail(e2) {
           obBusy = false; go.disabled = false; go.textContent = "Continue";
           err.textContent = "Couldn’t save — " + (e2 && e2.business ? e2.message : niceNetwork(e2)) + " Your answer is still here.";
           err.hidden = false;
-      }
+        });
     });
     root.appendChild(form);
     $("posBalance").focus();
@@ -1862,17 +1768,12 @@
   }
   function resetDemo(btn) {
     btn.disabled = true; btn.textContent = "Resetting…";
-    apiPost({ action: "resetGuest", client_id: newClientId(), today: localDayKey() })   // resetting twice = same result (safe retry)
+    apiPostOnce({ action: "resetGuest", today: localDayKey() })
       .then(function (d) {
         store.state = d.state; store.settings = d.settings; store.tx = d.transactions || []; store.plan = d.plan || null;
         saveCache(); hideUndoBar(); render();
       })
-      .catch(function (err) {
-        if (!outcomeUnknown(err)) { showLogError("Couldn’t reset the demo — " + err.message); return; }
-        showLogError("Checking with the server…");
-        return reconcile().then(function () { hideUndoBar(); showLogError("Showing the demo as the server has it now."); },
-          function () { showLogError("Couldn’t confirm the reset. Reload Pace to see the latest."); });
-      })
+      .catch(function (err) { showLogError("Couldn’t reset the demo — " + niceNetwork(err)); })
       .then(function () { btn.disabled = false; btn.textContent = "Reset demo"; });
   }
 
@@ -1961,23 +1862,20 @@
     var code = $("gateCode").value;
     if (!code) { gateError("Enter your access code."); return; }
     var go = $("gateGo"); go.disabled = true; go.textContent = "Checking…"; $("gateErr").hidden = true;
-    var slow = setTimeout(function () { go.textContent = "Still checking…"; }, 8000);
     apiPostOnce({ action: "login", code: code })
-      .catch(function (err) { if (outcomeUnknown(err)) return apiPostOnce({ action: "login", code: code }); throw err; })   // sign-in writes nothing on success
       .then(enterSession)
       .catch(function (err) {
         gateError(err && err.business ? err.message : niceNetwork(err));
         $("gateCode").select();
       })
-      .then(function () { clearTimeout(slow); go.disabled = false; go.textContent = "CONTINUE"; });
+      .then(function () { go.disabled = false; go.textContent = "CONTINUE"; });
   }
   function doGuest() {
     // Feel immediate: paint the (skeleton) app now, get the guest session in the background.
-    showApp(); setLoading(true);
+    showApp();
     apiPostOnce({ action: "guest" })
       .then(enterSession)
       .catch(function (err) {
-        setLoading(false);
         showGate();
         welcomeNote(err && err.business ? err.message : niceNetwork(err));
       });
@@ -1991,7 +1889,6 @@
     // 1. Hydrate instantly from cache if we have a valid one (no skeleton).
     var cached = loadCache();
     var hydrated = false;
-    if (!cached) setLoading(true);             // explicit "Loading your Pace…" instead of an empty page
     if (cached) {
       store.state = cached.state;
       store.settings = cached.settings;
@@ -2006,7 +1903,6 @@
     var epoch0 = dataEpoch;
     apiGet("all")
       .then(function (d) {
-        setLoading(false);
         if (d.user && session && d.user.key !== session.user) { onAuthLost(d.user.key); return; }
         if (epoch0 !== dataEpoch) return;     // a write happened while this read was in flight: its answer is stale, the write's response is newer
         store.state = d.state;
