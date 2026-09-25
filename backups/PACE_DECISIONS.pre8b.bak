@@ -34,7 +34,6 @@
 ## Auth & security
 - **D21. Lightweight private access, not OAuth** (deliberately): code-only sign-in, SHA-256 hashes in `USERS`, HMAC-signed stateless tokens, per-profile tabs. Codes never stored in source/docs/frontend.
 - **D22. Isolation by token only:** client-supplied user keys/sheet names are never used for authorization.
-- **D22a. Identity edits are narrow (Step 8B):** a name change writes only `display_name` (never the rest of the plan, never credentials); the private profile's name is the only editable identity; Guest's identity stays "Guest (demo)".
 - **D23. Guest is a disposable full-product demo** on shared data with a demo position; since Step 7.2 it can also edit its Money Plan (incl. Pace period) — only in `SET_GUEST`; Reset demo restores the clean demo exactly; it never touches private tabs and cannot onboard. No greeting / name field for Guest.
 - **D24. No data over GET**; tokens never in URLs.
 

@@ -1376,7 +1376,6 @@ function saveMoneyPlan_(ctx, input, clientToday) {
   var existingOf = function (settings) { return planFromSettings_(settings, ctx).commitments; };
 
   if (input && input.position_only === true) return savePosition_(ctx, input, clientToday, todayIso);
-  if (input && input.profile_only === true) return saveProfile_(ctx, input, clientToday, todayIso);
 
   if (input && input.dry_run) {
     var cur = readSettings(ctx);
@@ -1417,31 +1416,6 @@ function saveMoneyPlan_(ctx, input, clientToday) {
         writeSettingCell_(sh, last, merged[k], k === 'current_balance_date' || k === 'current_balance_covered' || k === 'pace_period_end');
       }
     });
-  } finally {
-    lock.releaseLock();
-  }
-  var settings = readSettings(ctx);
-  return { settings: settings, plan: planFromSettings_(settings, ctx), state: calculateState(ctx, clientToday) };
-}
-
-// PROFILE-ONLY save (Step 8B): writes ONLY the display_name cell of the caller's own Settings tab ("What should Pace
-// call me?"). Same validation as everywhere else (trimmed, <= DISPLAY_NAME_MAX, no control characters, never hash-like;
-// '' = no name -> no greeting). Nothing else is read-modify-written, so a stale plan on another device can never be
-// overwritten by a name change. Guest keeps its fixed demo identity ("Guest").
-function saveProfile_(ctx, input, clientToday, todayIso) {
-  if (ctx.mode === 'guest') throw new Error('the demo profile name cannot be changed');
-  if (input.display_name === undefined || input.display_name === null) throw new Error('display name is required');
-  var extra = validateProfileExtras_({ display_name: input.display_name }, todayIso);
-  var lock = LockService.getScriptLock();
-  try { lock.waitLock(8000); } catch (e) { throw new Error('server busy, please retry'); }
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sh = ss.getSheetByName(ctx.set) || ensureSettingsTab_(ss, ctx.set, []);
-    var last = sh.getLastRow(), row = 0;
-    var rows = last >= 2 ? sh.getRange(2, 1, last - 1, 1).getValues() : [];
-    for (var i = 0; i < rows.length; i++) { if (String(rows[i][0]).trim() === 'display_name') { row = i + 2; break; } }
-    if (!row) { row = Math.max(last, 1) + 1; sh.getRange(row, 1).setValue('display_name'); }
-    writeSettingCell_(sh, row, extra.display_name, true);            // text: a name like "0123" stays a name
   } finally {
     lock.releaseLock();
   }

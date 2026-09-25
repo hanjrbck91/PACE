@@ -888,70 +888,6 @@
     return d;
   }
 
-  // ---- Step 8B: Profile & Identity — "What should Pace call me?" (display_name only; never credentials) ----
-  // Saved with saveMoneyPlan {profile_only:true, display_name}: only the name cell is written server-side.
-  var nameEdit = { open: false, value: "", busy: false, msg: "", kind: "" };
-  function cleanName(v) { return String(v == null ? "" : v).trim(); }
-  function nameProblem(n) {
-    if (n.length > 40) return "Keep it to 40 characters or fewer.";
-    if (/[\u0000-\u001f\u007f]/.test(n)) return "Please use plain letters and numbers.";
-    return "";
-  }
-  function profileNameBlock() {
-    var cur = (store.plan && store.plan.display_name) || "";
-    var box = el("div", "profile"); box.id = "profileBlock";
-    if (!nameEdit.open) {
-      var r = row("Name", cur || "Not set"); r.id = "profileNameRow"; box.appendChild(r);
-      var ed = el("button", "txbtn profile__edit", "Edit name"); ed.type = "button"; ed.id = "profileEdit";
-      ed.addEventListener("click", function () { nameEdit = { open: true, value: cur, busy: false, msg: "", kind: "" }; fillSheet("config"); var i = $("profileName"); if (i) { i.focus(); i.select(); } });
-      box.appendChild(ed);
-    } else {
-      box.appendChild(el("label", "label", "Your name")).setAttribute("for", "profileName");
-      var inp = el("input", "plan__text profile__input"); inp.type = "text"; inp.id = "profileName"; inp.maxLength = 40;
-      inp.autocomplete = "off"; inp.spellcheck = false; inp.value = nameEdit.value; inp.disabled = nameEdit.busy;
-      inp.setAttribute("aria-describedby", "profileHint");
-      inp.addEventListener("input", function () { nameEdit.value = inp.value; });
-      inp.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); saveName(); } });
-      box.appendChild(inp);
-      box.appendChild(el("p", "hint profile__hint", "Used for your greeting. Leave it empty for no name.")).id = "profileHint";
-      var acts = el("div", "profile__acts");
-      var sv = el("button", "txbtn profile__save", nameEdit.busy ? "Saving\u2026" : "Save"); sv.type = "button"; sv.id = "profileSave"; sv.disabled = nameEdit.busy;
-      sv.addEventListener("click", saveName);
-      var cc = el("button", "txbtn", "Cancel"); cc.type = "button"; cc.id = "profileCancel"; cc.disabled = nameEdit.busy;
-      cc.addEventListener("click", function () { nameEdit = { open: false, value: "", busy: false, msg: "", kind: "" }; fillSheet("config"); });
-      acts.appendChild(sv); acts.appendChild(cc); box.appendChild(acts);
-    }
-    if (nameEdit.msg) { var m = el("p", "profile__msg" + (nameEdit.kind === "err" ? " is-err" : ""), nameEdit.msg); m.id = "profileMsg"; m.setAttribute("role", "status"); box.appendChild(m); }
-    return box;
-  }
-  function nameDone(msg, kind, keepOpen) {
-    nameEdit.busy = false; nameEdit.msg = msg; nameEdit.kind = kind || ""; if (!keepOpen) nameEdit.open = false;
-    if (openKind === "config") fillSheet("config");
-  }
-  function saveName() {
-    if (nameEdit.busy) return;
-    var n = cleanName(nameEdit.value), bad = nameProblem(n);
-    if (bad) { nameDone(bad, "err", true); return; }
-    if (n === ((store.plan && store.plan.display_name) || "")) { nameDone("", "", false); return; }   // unchanged: no request
-    nameEdit.busy = true; nameEdit.msg = ""; if (openKind === "config") fillSheet("config");
-    apiPost({ action: "saveMoneyPlan", today: localDayKey(), client_id: newClientId(), plan: { profile_only: true, display_name: n } })
-      .then(function (d) {
-        store.settings = d.settings; store.plan = d.plan; store.state = d.state;
-        saveCache(); clearSyncNote();
-        nameEdit.busy = false; nameEdit.open = false; nameEdit.msg = "Saved."; nameEdit.kind = "ok";
-        render();                                   // greeting updates now (render also refreshes this sheet)
-      })
-      .catch(function (e) {
-        if (!outcomeUnknown(e)) { nameDone("Couldn\u2019t save \u2014 " + e.message, "err", true); return; }
-        nameEdit.msg = "Checking with the server\u2026"; nameEdit.kind = ""; if (openKind === "config") fillSheet("config");
-        reconcile().then(function (d) {                            // read-only: never re-sends the write
-          var got = (d.plan && d.plan.display_name) || "";
-          if (got === n) { nameEdit.open = false; nameDone("Saved.", "ok"); }
-          else nameDone("Your name wasn\u2019t saved. You can try again.", "err", true);
-        }, function () { nameDone("Couldn\u2019t confirm whether your name was saved. Reload Pace to check.", "err", true); });
-      });
-  }
-
   function fillSheet(kind) {
     var s = store.state, cfg = store.settings || {}, inp = (s && s.inputs) || {};
     sheetTitle.textContent = TITLES[kind] || "";
@@ -995,7 +931,6 @@
     } else if (kind === "config") {
       var c = el("div", "rows");
       c.appendChild(row("Profile", PROFILE_LABEL[session && session.user] || (session && session.mode === "guest" ? "Guest (demo)" : "Signed in")));
-      if (!(session && session.mode === "guest")) c.appendChild(profileNameBlock());
       // Currency selector (display unit only — no conversion)
       var crow = el("div");
       crow.appendChild(el("span", "rk", "Currency"));
@@ -1229,7 +1164,6 @@
   function closeSheet() {
     if (sheet.hidden) return;
     openKind = null;
-    if (!nameEdit.busy) nameEdit = { open: false, value: "", busy: false, msg: "", kind: "" };   // a reopened Settings starts clean
     sheet.classList.remove("open");
     var done = function () { sheet.hidden = true; sheet.removeEventListener("transitionend", done); };
     sheet.addEventListener("transitionend", done);

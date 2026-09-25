@@ -9,7 +9,7 @@
  * Each fault is keyed by action and counts down per request.
  */
 (function () {
-  var realFetch = window.fetch.bind(window);
+  var realFetch = window.fetch.bind(window); window.__realFetch = realFetch;
   window.__faults = {}; window.__posts = [];
   try { window.__faults = JSON.parse(localStorage.getItem('pace_test_faults') || '{}'); localStorage.removeItem('pace_test_faults'); } catch (e) {}   // faults for the first load (set before a reload)
   window.fetch = function (url, opts) {

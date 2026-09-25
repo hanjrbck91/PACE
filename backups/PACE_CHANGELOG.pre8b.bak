@@ -2,11 +2,6 @@
 
 > Historical record, newest first. Concise. Not required reading; open the relevant entry only. Apps Script versions = web-app deployment versions; Netlify IDs = deploy IDs.
 
-## 2026-09-25 — Step 8B: Profile & Identity (local, NOT deployed)
-- Settings → Profile: Name + Edit name (input / Save / Cancel) for private profiles; Guest unchanged ("Guest (demo)", no editor).
-- Backend: `saveMoneyPlan {profile_only:true, display_name}` → new `saveProfile_` (writes only display_name; Guest refused; existing validation). Additive; no schema/auth/finance change. Chosen over re-sending the whole plan so a name change can never overwrite a newer plan from another device.
-- Tests: backend 461/0 (+15), frontend profile 13/0, browser profile 21/21; 8A suites and Pace Period/layout re-run green.
-
 ## 2026-09-25 — Step 8A: production reliability stabilization (local, NOT deployed)
 - Frontend only (`app.js`, `index.html`, `styles.css`); backend untouched (still v14). Explicit "Loading your Pace…" first-load state; request timeout 15 s → 30 s (measured latency up to 31.6 s); a reply for a different action (Google ping) is no longer accepted as success; after a write whose outcome is unknown the app reads the server and reports "saved / wasn't saved / couldn't confirm" instead of "Not recorded" — never re-sending beyond the existing single client_id retry; slow Money Plan preview no longer blocks saving; sign-in shows "Still checking…" and retries once on transport failure; Reset demo may retry (idempotent); `greetingFor()` extracted (device-local hour, unchanged boundaries).
 - Tests: +25 `frontend_reliability.js`, +17 `browser_reliability.js`; existing 446/13/34/18 green.

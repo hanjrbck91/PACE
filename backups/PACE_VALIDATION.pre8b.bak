@@ -3,18 +3,16 @@
 > Behavioral truth. Update after every verified change; replace obsolete numbers instead of keeping them.
 
 ## Current build
-- Backend `apps-script/Code.gs` — LF-normalized SHA-256 prefix `76283fe6bd9a6ce2` (**local Step 8B, NOT deployed**). Production Apps Script **v14** = prefix `a4bba9a032051663` (`backups/Code.gs.pre8b.bak`). Production Apps Script **v13** = prefix `1e11c25d0bb738ff` (`backups/Code.gs.pre71.bak`).
+- Backend `apps-script/Code.gs` — LF-normalized SHA-256 prefix `a4bba9a032051663` = production Apps Script **v14** (deployed 2026-09-24; editor content verified by SHA before the version was created). Production Apps Script **v13** = prefix `1e11c25d0bb738ff` (`backups/Code.gs.pre71.bak`).
 - Frontend `frontend/*` = production Netlify **`6ab4fa3acba9766b6679413b`** (served `app.js`, `styles.css`, `config.js` byte-identical; `index.html` differs only by Netlify's injected comment; `config.js` unchanged).
 
 ## Automated tests
 | Suite | Result | Date |
 |---|---|---|
-| `node tests/backend_sim.js` | **461 passed / 0 failed** (446 + 15 Step 8B N-1…N-15) | 2026-09-25 |
+| `node tests/backend_sim.js` | **446 passed / 0 failed** (437 + 9 Step 7.2) | 2026-09-24 |
 | `node tests/frontend_dates.js` | **13 passed / 0 failed** | 2026-09-25 |
 | `node tests/frontend_reliability.js` (Step 8A: greeting boundaries, reply classification, retry/duplicate safety) | **25 passed / 0 failed** | 2026-09-25 |
-| `tests/browser_reliability.js` (Step 8A, local dev backend with fetch fault injection) | **17/17** (re-run after 8B) | 2026-09-25 |
-| `node tests/frontend_profile.js` (Step 8B: greeting with named/empty/Unicode/Guest, name rules, profile_only payload) | **13 passed / 0 failed** | 2026-09-25 |
-| `tests/browser_profile.js` (Step 8B, local dev backend) | **21/21** (view, edit/cancel, save + greeting, reload persistence, empty, Unicode, invalid, lost reply, undelivered, Guest, 6 widths) | 2026-09-25 |
+| `tests/browser_reliability.js` (Step 8A, local dev backend with fetch fault injection) | **17/17** | 2026-09-25 |
 | `tests/browser_pace_period.js` (local dev backend, browser pane) | **34/34 scenario checks** + layout 18/18 (6 widths) + 2 private-isolation checks | 2026-09-24 |
 | `tests/dev_runtime.js` (DEV web app) | 35/35 historically — DEV runs old v9 code, **does not cover V2** | 2026-09-20 |
 
@@ -33,11 +31,6 @@
 - End tomorrow ⇒ today 3000 / tomorrow 6000; end today ⇒ D = 1, tomorrow null; end == anchor == today ⇒ one-day period.
 - Leap: 2028-02-28 → 03-01 = 3 days; year boundary Dec 31 → Jan 2 = 3 days.
 - Invalid (before anchor / corrupt) ⇒ `invalid_period`; passed ⇒ `period_ended`; saves with a past end, bad date, or a balance dated after the end are rejected with nothing written.
-
-## Step 8B Profile & Identity (LOCAL only, 2026-09-25)
-- Backend: `saveMoneyPlan {profile_only:true, display_name}` → `saveProfile_` writes only the display_name cell; Guest refused; same validation as before. Sim N-1…N-15: only that cell changes, Pace/state unchanged, Unicode, empty, invalid rejected (nothing written), missing row created, isolation (other private tabs, Muhammed, Guest), spoofed identifiers ignored, no GET/unauth writes, idempotent, numeric-looking name kept as text, old full-save path unchanged. Mutation check: removing the Guest guard fails N-10.
-- Browser (dev backend): profile 21/21; name survives reload and logout/sign-in again; Guest private data and dev MUHAMMED/FRIEND unchanged by Guest activity. Regression after 8B: Pace Period 34/34, reliability 17/17, layout 18/18.
-- Test-harness note: two isolated browser-scenario failures (one in 8A, one in 8B) were caused by starting the next scenario while a bottom sheet was still animating closed; both passed when re-run after the sheet closed.
 
 ## Step 8A stabilization (LOCAL only, 2026-09-25)
 - Measured production latency (read-only, Guest, Node, 6 rounds): sign-in (`guest`) 1.96–4.68 s warm and 31.6 s on a cold start (that round also returned an HTML error page); first `all` read 2.6–11.0 s. Earlier the same week: spikes ~18 s and occasional POST→ping answers.
@@ -77,7 +70,7 @@ Not verified in browser: afternoon/evening greeting boundaries, screen-reader pa
 - Observation: production Guest sign-in twice hit the app's 15 s timeout ("Server timed out") before succeeding on retry — Apps Script latency spikes (known, see Architecture/limitations), not a code defect.
 
 ## Known untested / weak areas
-- Steps 8A/8B are verified only locally (simulation + dev backend + injected faults), not in production (not deployed).
+- Step 8A behaviour is verified only locally with injected faults, not against real production latency (not deployed).
 - Pace Period not exercised on a private production profile (Guest only). Native date-picker appearance differs per browser (functional behaviour checked in Chromium only).
 - Money Plan editor on a private production profile (verified only with the identical bundle on DEV).
 - Real DEV web-app runtime for V2 (only simulated).

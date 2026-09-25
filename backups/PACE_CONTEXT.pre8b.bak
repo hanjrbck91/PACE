@@ -2,7 +2,7 @@
 
 > CURRENT STATE ONLY. Read with `PACE_GUARDRAILS.md` before any work. Load the other canonical files only when the task needs them (see "Doc map"). Source code = implementation truth; `tests/` = behavioral truth; this file = what a new session must know to work safely. History lives in `PACE_CHANGELOG.md`, not here.
 >
-> Last verified: 2026-09-25 (source; backend sim 461/0; frontend dates 13/0, reliability 25/0, profile 13/0; local browser: Pace Period 34/34, reliability 17/17, layout 18/18, profile 21/21).
+> Last verified: 2026-09-25 (source; backend sim 446/0; frontend dates 13/0; frontend reliability 25/0; local browser 34/34 + reliability 17/17 + layout 18/18).
 
 ## Doc map
 | File | Read when |
@@ -21,10 +21,10 @@ Pace answers "How much can I spend today and still protect my savings?" — a **
 ## Current milestone
 **Step 7 COMPLETE — Pace Period (7.1 + 7.2) and Guest parity are LIVE in production (deployed 2026-09-24).**
 - Backend: Apps Script **Version 14** (`apps-script/Code.gs` LF SHA-256 prefix `a4bba9a032051663`). Frontend: Netlify **`6ab4fa3acba9766b6679413b`** (served `app.js`/`styles.css`/`config.js` byte-identical to local `frontend/`; `index.html` differs only by Netlify's injected comment).
-- **Local is AHEAD of production (batched, NOT deployed):** Step 8A stabilization (frontend) + **Step 8B Profile & Identity (frontend + backend: `saveMoneyPlan {profile_only}` / `saveProfile_`; local Code.gs prefix `76283fe6bd9a6ce2`)**. The batch must deploy backend (new Apps Script version) before/with the frontend — the 8B name editor needs the new backend. Needs explicit approval.
+- **Local frontend is AHEAD of production: Step 8A stabilization (local only, NOT deployed).** Backend unchanged (Code.gs still == v14). Deploying 8A = frontend only, needs explicit approval.
 - Rollback targets: Apps Script **v13** + Netlify **`6ab097334eab6fae293bd100`** (both together).
 
-**Immediate next target:** wait for human direction (batched local milestones 8A + 8B are ready for review; no deployment without approval).
+**Immediate next target:** owner review of the Step 8A stabilization build, then (if approved) a frontend-only deploy; keep observing real use.
 
 **Step 8A reliability findings (2026-09-25):** first screen after sign-in was blank because sign-in and the first data read are two sequential Apps Script calls (measured warm: sign-in 2–4.7 s + read 2.6–11 s; one cold start 31.6 s) and nothing was drawn meanwhile; the old 15 s timeout aborted requests that were still succeeding, and a Google ping reply to a POST was accepted as success. Local fix: an explicit "Loading your Pace…" note ("Still loading…" after 8 s), 30 s timeout, odd replies treated as outcome-unknown, and after an unknown-outcome write the app READS the server (never re-sends) and reports what actually happened.
 
@@ -34,7 +34,6 @@ Pace answers "How much can I spend today and still protect my savings?" — a **
 - **Data per profile:** Settings tab (key/value) + Transactions tab (`Date | Amount | Note | Type | ID`). V2 keys: `display_name`, `currency`, `monthly_income`, `monthly_savings_target`, `commitments` (JSON `{id,name,amount,status,paid_at}`), `current_balance`, `current_balance_date`, `current_balance_covered`, `minimum_daily_spend`, `pace_period_end`. Legacy keys (`fixed_monthly_expenses` = sum of commitments, `starting_balance*`, metro/auto) remain but are not the Pace model.
 - **Pace engine:** one pure backend function `calculatePaceV2_` (Code.gs). Frontend only presents `state.v2` (+ a server-replaced optimistic mirror).
 - **Pace Period (live, Step 7):** period = `current_balance_date` (start) … `pace_period_end` (inclusive end; absent = end of this calendar month). Users see it as "When should your money last until?" in onboarding step 5 (default *End of this month*, optional date) and in Money Plan (Change / Use end of this month / ⓘ); Settings shows "Pace period Sep 10 → Oct 5" + *Edit Pace period* (same editor). Today shows "Pace until Oct 5" in the dateline when a custom end is set. Ended period ⇒ Today state **PERIOD ENDED** + *Set Pace period* (balance kept); a new balance while the period is over must be saved together with a new end date (Money Plan explains; nothing is written otherwise).
-- **Profile & Identity (local, Step 8B):** Settings shows a Profile block for private profiles — Name (display_name) + *Edit name* → input / Save / Cancel. Saved via `saveMoneyPlan {profile_only:true, display_name}`, which writes ONLY the display_name cell (trimmed, ≤40, no control characters, Unicode kept; empty = no greeting). Greeting updates immediately; unknown-outcome saves use the 8A read-only check. Guest keeps its fixed "Guest (demo)" identity (no editor; backend refuses). The Money Plan "Your name" field still works as before.
 - **Guest (live, Step 7):** full product on disposable shared demo data — Money Plan (income, savings, balance, commitments, Pace period) is editable; Reset demo restores the clean demo exactly; private tabs are never touched. Guest has no name field/greeting.
 - **Setup state machine:** `plan.setup_state` = `needs_plan` → onboarding; `needs_position` → "How much money do you have available right now?"; `complete` → Today. Guest is always complete.
 - **Today screen (accepted):** Pace-first — status → Today's Pace → Pace slider (today's spending vs today's pace) → spent/left-or-over today → From tomorrow / Remaining flexible / Days left → Today's expenses (integrated ledger) → + Log an expense. Money Plan edits name, income, savings, current balance, Pace period, commitments (paid/unpaid).

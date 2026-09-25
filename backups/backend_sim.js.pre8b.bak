@@ -1056,33 +1056,6 @@ function main() {
   ok('Q-8. onboarding without an end date keeps the month-end default', (() => { const t = mkUser(40, 'NEWT13'); const r = ob(t, {}); return r.ok && r.data.plan.pace_period_end === null && r.data.state.v2.period_end === '2026-09-30'; })());
   ok('Q-9. Guest full demo edit (plan + balance + period) then Reset demo -> SET_GUEST byte-identical to a fresh reset; private tabs untouched', (() => { call(env, { action: 'resetGuest', token: TG, today: T71 }); const clean = rowsOf('SET_GUEST'), priv = J2([ss.getSheetByName('SET_MUH').rows, ss.getSheetByName('TX_MUH').rows]); const r = plan(TG, { income: 40000, savings: 5000, commitments: [{ name: 'Gym', amount: 1000, status: 'paid' }], current_balance: 30000, display_name: 'G', minimum_daily_spend: 100, pace_period_end: '2026-10-10' }, T71); call(env, { action: 'resetGuest', token: TG, today: T71 }); return r.ok && r.data.state.v2.period_end === '2026-10-10' && rowsOf('SET_GUEST') === clean && J2([ss.getSheetByName('SET_MUH').rows, ss.getSheetByName('TX_MUH').rows]) === priv; })());
 
-  console.log('\n== Step 8B: Profile & Identity (profile_only name save) ==');
-  const T8 = '2026-09-25';
-  const prof8 = (tok, name, extra) => call(env, { action: 'saveMoneyPlan', token: tok, today: T8, plan: Object.assign({ profile_only: true, display_name: name }, extra || {}) });
-  const TA8 = mkUser(41, 'NEWU1', [['key', 'value'], ['monthly_income', 50000], ['monthly_savings_target', 5000], ['fixed_monthly_expenses', 1000], ['commitments', JSON.stringify([{ name: 'Rent', amount: 1000 }])], ['display_name', 'Asha'], ['current_balance', 9000], ['current_balance_date', '2026-09-20'], ['starting_balance', 300], ['starting_balance_date', '2026-09-01']],
-    [['Date', 'Amount', 'Note', 'Type', 'ID'], ['2026-09-21', 40, 'tea', 'expense', 'u8-1']]);
-  const TB8 = mkUser(42, 'NEWU2', [['key', 'value'], ['monthly_income', 40000], ['monthly_savings_target', 4000], ['fixed_monthly_expenses', 0], ['display_name', 'Bilal'], ['current_balance', 5000], ['current_balance_date', '2026-09-20']]);
-  const a8Rows = ss.getSheetByName('SET_NEWU1').rows.map(r => r.slice()), a8Tx = rowsOf('TX_NEWU1'), b8 = rowsOf('SET_NEWU2'), g8 = rowsOf('SET_GUEST'), m8 = J2(ss.getSheetByName('SET_MUH').rows);
-  const a8State = J2(st3(TA8, T8).state.v2);
-  ok('N-1. existing name is returned in the plan', st3(TA8, T8).plan.display_name === 'Asha');
-  const N2 = prof8(TA8, '  Asha K  ');
-  ok('N-2. profile_only saves the trimmed name; response + next read show it', N2.ok && N2.data.plan.display_name === 'Asha K' && st3(TA8, T8).plan.display_name === 'Asha K', J2(N2.error));
-  const a8After = ss.getSheetByName('SET_NEWU1').rows;
-  ok('N-3. ONLY the display_name cell changed (income, savings, commitments, balance, dates, starting_balance byte-identical); transactions untouched', a8After.length === a8Rows.length && a8After.every((r, i) => r[0] === 'display_name' ? r[1] === 'Asha K' : J2(r) === J2(a8Rows[i])) && rowsOf('TX_NEWU1') === a8Tx);
-  ok('N-4. Pace is not affected by the name (state.v2 identical)', J2(st3(TA8, T8).state.v2) === a8State);
-  ok('N-5. Unicode names are preserved exactly', ['محمد', 'Мухаммед', 'José Ñúñez', '李小龙', 'Zoë 🌙'].every(n => { const r = prof8(TA8, n); return r.ok && r.data.plan.display_name === n && st3(TA8, T8).plan.display_name === n; }));
-  ok('N-6. empty name is allowed (existing semantics: no name -> no greeting) and stored as empty', (() => { const r = prof8(TA8, '   '); return r.ok && r.data.plan.display_name === '' && st3(TA8, T8).plan.display_name === ''; })());
-  const a8b = rowsOf('SET_NEWU1');
-  ok('N-7. invalid names rejected, nothing written: too long, control chars, hash-like, non-text, missing', [prof8(TA8, 'x'.repeat(41)), prof8(TA8, 'bad\u0007name'), prof8(TA8, 'a'.repeat(64)), prof8(TA8, 12345), call(env, { action: 'saveMoneyPlan', token: TA8, today: T8, plan: { profile_only: true } })].every(r => !r.ok) && rowsOf('SET_NEWU1') === a8b);
-  ok('N-8. a missing display_name row is created (profile without a name yet)', (() => { const t = mkUser(43, 'NEWU3', [['key', 'value'], ['monthly_income', 30000], ['monthly_savings_target', 0], ['fixed_monthly_expenses', 0]]); const r = prof8(t, 'Nia'); return r.ok && r.data.plan.display_name === 'Nia' && ss.getSheetByName('SET_NEWU3').rows.some(x => x[0] === 'display_name' && x[1] === 'Nia'); })());
-  ok('N-9. private isolation: NEWU1 name changes never touch NEWU2, Muhammed or Guest', rowsOf('SET_NEWU2') === b8 && J2(ss.getSheetByName('SET_MUH').rows) === m8 && rowsOf('SET_GUEST') === g8);
-  ok('N-10. Guest cannot rename the demo profile (stays "Guest"); nothing written', !prof8(TG, 'Hacker').ok && rowsOf('SET_GUEST') === g8 && st3(TG, T8).plan.display_name === 'Guest');
-  ok('N-11. spoofed identifiers are ignored: the save lands only in the caller\'s tab', (() => { const r = call(env, { action: 'saveMoneyPlan', token: TB8, today: T8, user_key: 'NEWU1', settings_sheet: 'SET_NEWU1', plan: { profile_only: true, display_name: 'Bee', settings_sheet: 'SET_NEWU1' } }); return r.ok && st3(TB8, T8).plan.display_name === 'Bee' && st3(TA8, T8).plan.display_name === ''; })());
-  ok('N-12. unauthenticated / bad token / GET cannot change a name', call(env, { action: 'saveMoneyPlan', today: T8, plan: { profile_only: true, display_name: 'x' } }).error === 'unauthorized' && call(env, { action: 'saveMoneyPlan', token: 'a.b', today: T8, plan: { profile_only: true, display_name: 'x' } }).error === 'unauthorized' && JSON.parse(env.doGet({ parameter: { action: 'saveMoneyPlan', profile_only: 'true', display_name: 'x', token: TA8 } }).getContent()).error === 'unauthorized');
-  ok('N-13. idempotent: saving the same name twice gives the same stored state (safe single retry)', (() => { prof8(TA8, 'Asha'); const x = rowsOf('SET_NEWU1'); prof8(TA8, 'Asha'); return rowsOf('SET_NEWU1') === x; })());
-  ok('N-14. a name that looks numeric is kept as a name (stored as text)', (() => { const r = prof8(TA8, 'Agent 007'); return r.ok && st3(TA8, T8).plan.display_name === 'Agent 007'; })());
-  ok('N-15. full Money Plan save still carries display_name as before (existing path unchanged)', (() => { const pl = st3(TA8, T8).plan; const r = call(env, { action: 'saveMoneyPlan', token: TA8, today: T8, plan: { income: pl.income, savings: pl.savings, commitments: pl.commitments.map(c => ({ id: c.id, name: c.name, amount: c.amount })), display_name: 'Asha' } }); return r.ok && r.data.plan.display_name === 'Asha'; })());
-
   console.log('\n== Legacy tabs untouched at the end ==');
   ok('legacy Transactions/Settings byte-identical to start', legacyBefore === JSON.stringify(ss.getSheetByName('Transactions').rows) + JSON.stringify(ss.getSheetByName('Settings').rows));
 
