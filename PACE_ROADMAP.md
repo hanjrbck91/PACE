@@ -3,8 +3,7 @@
 > Direction, not commitments. Nothing here is approved for implementation until the owner says so for a specific task. Check `PACE_DECISIONS.md` for conflicts first.
 
 ## NOW
-- **Batched local milestones (each COMPLETE LOCALLY) awaiting review/approval for ONE combined deployment (backend first):** Step 8A (stabilization: loading state, honest unknown-outcome writes, 30 s timeout) + Step 8B (Profile & Identity, needs the new backend) + Step 8C (Contextual Check-ins, frontend only). No deployment without explicit approval.
-- **Observe real-user behavior and collect feedback** (V2 + Pace Period live).
+- **Observe real-user behavior and collect feedback** (V2, Pace Period and Steps 8A–8C live since 2026-09-25).
 
 ## NEXT (candidates, need an explicit product decision)
 - **Profile / multi-user improvements** (adding users beyond MUHAMMED/FRIEND; today provisioned by hand in `USERS`).
@@ -31,7 +30,7 @@
 - Manual timezone, Undo stack, date editing, real OAuth/DB backend — only if the user base outgrows the MVP.
 
 ## Done (for orientation)
-Contextual check-ins — last day of the Pace period + commitment paid today (Step 8C, local).
-Name editing in Settings (Step 8B, local).
+Contextual check-ins — last day of the Pace period + commitment paid today (Step 8C, live since 2026-09-25).
+Name editing in Settings (Step 8B, live since 2026-09-25).
 Pace Period (7.1 foundation + 7.2 user-facing) and Guest parity — live in production since 2026-09-24 (Step 7).
 Time-based greeting and editable `display_name` shipped in Step 5.8 (now in production).

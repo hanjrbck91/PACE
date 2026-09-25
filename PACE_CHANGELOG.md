@@ -2,6 +2,10 @@
 
 > Historical record, newest first. Concise. Not required reading; open the relevant entry only. Apps Script versions = web-app deployment versions; Netlify IDs = deploy IDs.
 
+## 2026-09-25 — Steps 8A–8C deployed to production
+- Commit `31b7b2a`. Backend Apps Script **v15** (12:17 IST) → verified → frontend Netlify **`6ab61b2db12e7c1610937be9`** (12:26 IST). Rollback: v14 + `6ab4fa3acba9766b6679413b`.
+- Production verification PASS (backend, frontend, profile/name, Money Plan name, dates, reliability, check-in, isolation, responsive, console/network); MUHAMMED settings byte-identical to the pre-deploy snapshot; FRIEND untouched. Observed a ~3-min Google-side Apps Script degradation during verification (404/HTML replies), handled by 8A. Details in `PACE_VALIDATION.md`.
+
 ## 2026-09-25 — Step 8C: Contextual Check-ins (local, NOT deployed)
 - Today can show one quiet "A note from Pace" between the meta rows and Today's expenses, derived only from the server state already returned (`checkinFor(state.v2, plan, localDayKey())`): **last day of the Pace period** (`days_remaining_after_today = 0`; wording differs for a configured end vs the month-end default) and **commitment marked paid today** (`paid_at` = today; names ≤ 2 commitments with amounts, else a count). Last day wins; none while Pace is not ready (PERIOD ENDED etc.).
 - Deliberately not built: behind/ahead (BEHIND / OVER PACE lines already exist; no product rule defines "significantly ahead"), large expense (the stamp already uses the rule; the state doesn't know which expense), "N days left" (Days left row). No persistence, no backend change, no schema change, no notifications.

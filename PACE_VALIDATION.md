@@ -3,8 +3,8 @@
 > Behavioral truth. Update after every verified change; replace obsolete numbers instead of keeping them.
 
 ## Current build
-- Backend `apps-script/Code.gs` — LF-normalized SHA-256 prefix `76283fe6bd9a6ce2` (**local Step 8B, NOT deployed**). Production Apps Script **v14** = prefix `a4bba9a032051663` (`backups/Code.gs.pre8b.bak`). Production Apps Script **v13** = prefix `1e11c25d0bb738ff` (`backups/Code.gs.pre71.bak`).
-- Frontend `frontend/*` = **local Steps 8A + 8B + 8C, NOT deployed** (`app.js`, `styles.css`, `index.html` changed; `config.js` unchanged). Production Netlify **`6ab4fa3acba9766b6679413b`** = the pre-8A frontend (`backups/*.pre8a.bak`). Step 8C changed no backend code (Code.gs still `76283fe6bd9a6ce2`).
+- Backend `apps-script/Code.gs` — LF-normalized SHA-256 prefix `76283fe6bd9a6ce2` = **production Apps Script v15** (deployed 2026-09-25 12:17 IST; editor content verified by SHA before the version was created). Previous production Apps Script **v14** = prefix `a4bba9a032051663` (`backups/Code.gs.pre8b.bak`). Production Apps Script **v13** = prefix `1e11c25d0bb738ff` (`backups/Code.gs.pre71.bak`).
+- Frontend `frontend/*` (commit `31b7b2a`) = **production Netlify `6ab61b2db12e7c1610937be9`** (deployed 2026-09-25 12:26 IST; served `app.js`, `styles.css`, `config.js` byte-identical; `index.html` differs only by Netlify's injected hosting comment + `/.netlify/scripts/hud` script). Previous production Netlify **`6ab4fa3acba9766b6679413b`** = the pre-8A frontend (`backups/*.pre8a.bak`).
 
 ## Automated tests
 | Suite | Result | Date |
@@ -35,6 +35,23 @@
 - End tomorrow ⇒ today 3000 / tomorrow 6000; end today ⇒ D = 1, tomorrow null; end == anchor == today ⇒ one-day period.
 - Leap: 2028-02-28 → 03-01 = 3 days; year boundary Dec 31 → Jan 2 = 3 days.
 - Invalid (before anchor / corrupt) ⇒ `invalid_period`; passed ⇒ `period_ended`; saves with a past end, bad date, or a balance dated after the end are rejected with nothing written.
+
+## Production (Steps 8A–8C) — **DEPLOYED + VERIFIED (2026-09-25)**
+PRODUCTION VALIDATION (the LOCAL VALIDATION of the same code is in the Step 8A/8B/8C sections below and is unchanged).
+- Deployed from commit `31b7b2a` (branch `pace/step-8b-checkpoint`; working tree clean; Code.gs == the tested checkpoint). Backend **Apps Script v15** (12:17 IST, same deployment ID/URL, Execute as Me, access Anyone) → backend verified → frontend **Netlify `6ab61b2db12e7c1610937be9`** (12:26 IST, uploaded on the pace-ledger Deploys page). Rollback targets: Apps Script **v14** + Netlify **`6ab4fa3acba9766b6679413b`** (both together).
+- Pre-deploy (read-only): served frontend hash-matched `backups/*.pre8a.bak`; Apps Script editor content hash-matched v14; MUHAMMED + Guest snapshots taken (hashes only). FRIEND not touched (no sign-in, no reads).
+- **Backend: PASS** — v15 live (Guest `profile_only` → "the demo profile name cannot be changed", a v15-only reply; Guest unchanged); MUHAMMED `profile_only` save + read-back changed only `display_name` (transactions and Pace identical); existing Money Plan "Your name" path (old frontend on v15) saved and restored the original name.
+- **Frontend: PASS** — served `app.js`/`styles.css`/`config.js` byte-identical to `31b7b2a`; `index.html` = repo + Netlify hosting comment + hud script (platform injection, no code of ours).
+- **Profile/name: PASS** (MUHAMMED) — Settings → Profile shows the name; Edit name opens a labelled, focused input prefilled with the name; Save → "Saved.", row + greeting update at once; reload → greeting, row and editor prefill persist.
+- **Money Plan: PASS** — "Your name" present and shows the same value saved via Settings; saving it through Money Plan restored the original name; review preview unchanged apart from the name.
+- **Dates: PASS** (Guest) — period field default "End of this month · Sep 30"; date input min = today; end = today → review "Money lasts until Sep 25", Today dateline "Pace until Sep 25", 1 day, From tomorrow "—".
+- **Reliability: PASS** — first load without cache showed "Loading your Pace…" → "Still loading…" (> 8 s) and cleared when data arrived; odd Google replies were reported honestly ("Unexpected reply from the server." at Guest sign-in during an outage; a Money Plan save attempted during the outage was not claimed as saved and nothing was written; retried after recovery → saved). Fault injection itself is covered locally only.
+- **Check-in: PASS** (Guest) — mark the demo commitment paid → "A note from Pace — Fixed expenses (₹16,500) was marked paid today, so it is no longer set aside in your Pace."; reload → the same single note, no new localStorage keys; end = today → the last-day note wins; Reset demo → clean demo (45,000 / 10,000 / 45,000, no end, commitment unpaid, 10 entries) and no note. MUHAMMED (nothing paid today, not the last day) → no note.
+- **Private-profile isolation: PASS** — MUHAMMED settings byte-identical to the pre-deploy snapshot after all backend, frontend and Guest activity (`c1ea36c52fd60350`, name "Hadhil" restored); Guest refused a name change; Guest shows "Guest (demo)" with no name editor and no greeting. Transactions: identical (139) through the backend + name checks; the final read showed 140 — one new expense dated today ("Sandwich", ₹72, UUID id) that no verification step could create (only name saves were made on MUHAMMED) — owner activity, owner to confirm. FRIEND not checked by design.
+- **Responsive: PASS** — Guest Today with the note visible + Settings: no overflow and no target < 44 px at 375/390/412/430/1000; MUHAMMED (same-origin iframes of each width, read-only) Today, Settings → Profile and the open name editor: no overflow, no target < 44 px at 360/375/390/412/430/1000. Guest at 360: the known 16 px nav/header overflow (pre-existing, unchanged).
+- **Console/network: PASS** — no console errors in the signed-in session; one "Failed to load resource: 404" in the Guest pane matched a Google-side Apps Script outage (see below) and did not recur over 4 further reads (all 200 JSON); all Netlify assets 200/304; no contract mismatch (every request/response shape as in the local suites).
+- **Observed (environmental, not 8A–8C):** a ~3-minute Apps Script degradation at ≈12:40 IST — GET ping 404 after 34 s, POST `all` returned an HTML 404 page / took 19–77 s, then recovered (later reads 3–29 s). 8A handled it as designed.
+- **Overall 8A–8C production status: PASS.** No unrelated behavior changed.
 
 ## Step 8C Contextual Check-ins (LOCAL only, 2026-09-25)
 - Frontend only: `checkinFor(state.v2, plan, localDayKey())` → at most one "A note from Pace" on Today, between the meta rows and Today's expenses. Two kinds: **last_day** (`v.ready` and `days_remaining_after_today === 0`) and **commitment_paid** (a commitment with `status:'paid'` and `paid_at` = today). Not ready (PERIOD ENDED / CHECK YOUR DATE / POSITION NEEDED) ⇒ no note. Nothing stored; nothing written.
@@ -90,7 +107,7 @@ Not verified in browser: afternoon/evening greeting boundaries, screen-reader pa
 - Observation: production Guest sign-in twice hit the app's 15 s timeout ("Server timed out") before succeeding on retry — Apps Script latency spikes (known, see Architecture/limitations), not a code defect.
 
 ## Known untested / weak areas
-- Steps 8A/8B/8C are verified only locally (simulation + dev backend + injected faults), not in production (not deployed).
+- Steps 8A/8B/8C are verified in production (2026-09-25, see above); the fault-injection scenarios (lost reply, undelivered request, ping echo) are verified locally only.
 - Nav/masthead overflow below 375 px (Guest at 360 px, all profiles at 320 px) — pre-existing, not fixed.
 - Pace Period not exercised on a private production profile (Guest only). Native date-picker appearance differs per browser (functional behaviour checked in Chromium only).
 - Money Plan editor on a private production profile (verified only with the identical bundle on DEV).
